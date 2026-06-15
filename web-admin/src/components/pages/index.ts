@@ -1,6 +1,7 @@
 export { Dashboard } from "./Dashboard";
 export { RoomsPage } from "./RoomsPage";
 export { ShiftsPage } from "./ShiftsPage";
+export { ControlPage } from "./ControlPage";
 export { MembersPage } from "./MembersPage";
 export { CustomersPage } from "./CustomersPage";
 export { TasksPage } from "./TasksPage";
@@ -9,4 +10,4 @@ export { FinancePage } from "./FinancePage";
 export { ReportsPage } from "./ReportsPage";
 export { AuditPage } from "./AuditPage";
 export { SettingsPage } from "./SettingsPage";
-export type { ApiCall } from "./types";
+export type { ApiCall, ApiDownload } from "./types";

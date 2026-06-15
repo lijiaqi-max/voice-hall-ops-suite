@@ -136,6 +136,11 @@ td input { min-width: 100px; padding: 7px; }
 .finance-grid b { font: 600 23px "Newsreader", serif; margin-top: 8px; }
 .finance-grid .profit { background: var(--forest); color: white; border-color: var(--forest); }
 .finance-grid .profit span { color: #a9c5b9; }
+.warning-panel { margin-top: 14px; border: 1px solid #e0b56b; background: #fff7e7; color: #78551f; border-radius: 12px; padding: 10px 15px; }
+.warning-panel p { margin: 5px 0; }
+.history-note { display: grid; gap: 4px; border-top: 1px solid var(--line); padding: 12px 2px; margin-top: 10px; }
+.history-note span, .history-note small { color: var(--muted); }
+input[type="radio"] { width: auto; }
 .report-hero { border-radius: 15px; padding: 24px; background: linear-gradient(120deg, #173f33, #27624f); color: white; margin-bottom: 18px; }
 .report-hero span, .report-hero small, .report-hero strong { display: block; }
 .report-hero strong { font: 600 36px "Newsreader", serif; margin: 8px 0; }

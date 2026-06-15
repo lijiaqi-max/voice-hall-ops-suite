@@ -1,5 +1,3 @@
-import * as XLSX from "xlsx";
-
 export const cents = (yuan: string | number) =>
   Math.round(Number(yuan || 0) * 100);
 
@@ -64,6 +62,7 @@ export function normalizeRevenueRows(
 }
 
 export async function parseRevenueFile(file: File, roomId: string) {
+  const XLSX = await import("xlsx");
   const buffer = await file.arrayBuffer();
   const workbook = XLSX.read(buffer, { type: "array", cellDates: true });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];

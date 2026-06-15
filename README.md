@@ -29,6 +29,15 @@ cd D:\int\voice-hall-ops-suite
 
 运行 `.\scripts\package-source.ps1` 会生成不含签名密钥、数据库和构建缓存的源码部署包 `voice-hall-ops-suite-1.0.0-source-and-deploy.zip`。
 
+比赛演示环境可用以下命令在一分钟内重建并启动：
+
+```powershell
+.\scripts\reset-demo.ps1
+.\scripts\start-demo.ps1
+```
+
+演示结束后运行 `.\scripts\stop-demo.ps1`。完整讲稿和故障兜底见 [比赛演示手册](docs/DEMO.md)，当前完成度和发布阻断项见 [比赛冲刺状态](docs/COMPETITION_STATUS.md)。
+
 ## 首次部署
 
 1. 复制 `.env.example` 为 `infra/.env`，替换全部密码和密钥。

@@ -84,3 +84,132 @@ export type Audit = {
   summary: string;
   createdAtEpochMs: number;
 };
+
+export type Device = {
+  id: string;
+  roomId: string;
+  name: string;
+  enabled: boolean;
+  lastSeenAtEpochMs?: number;
+};
+
+export type MicSegment = {
+  id: string;
+  roomId: string;
+  shiftId?: string;
+  wechatName?: string;
+  ingkeeName: string;
+  role: string;
+  queuePosition?: number;
+  startedAtEpochMs: number;
+  endedAtEpochMs?: number;
+  durationSeconds: number;
+  state: string;
+  correctionReason?: string;
+};
+
+export type Binding = {
+  id: string;
+  roomId: string;
+  wechatName: string;
+  ingkeeName: string;
+  state: string;
+  updatedAtEpochMs: number;
+};
+
+export type Attendance = {
+  id: string;
+  roomId: string;
+  shiftId: string;
+  wechatName?: string;
+  ingkeeName: string;
+  ordinarySeconds: number;
+  hostSeconds: number;
+  segmentCount: number;
+  lastSeenAtEpochMs: number;
+};
+
+export type QueueEntry = {
+  id: string;
+  roomId: string;
+  shiftId: string;
+  wechatName: string;
+  role: string;
+  position: number;
+  state: string;
+  updatedAtEpochMs: number;
+};
+
+export type RevenueImport = {
+  id: string;
+  fileName: string;
+  fileSha256: string;
+  expectedTotalCents: number;
+  calculatedTotalCents: number;
+  rowCount: number;
+  duplicateCount: number;
+  state: string;
+  createdAtEpochMs: number;
+  committedAtEpochMs?: number;
+};
+
+export type Settlement = {
+  id?: string;
+  roomId?: string;
+  periodStartEpochMs: number;
+  periodEndEpochMs: number;
+  ruleId: string;
+  grossCents: number;
+  platformDeductionCents: number;
+  organizationShareCents: number;
+  memberCommissionCents: number;
+  hostCostCents: number;
+  expenseCents: number;
+  accountsReceivableCents: number;
+  accountsPayableCents: number;
+  netProfitCents: number;
+  baseAccountsReceivableCents: number;
+  baseAccountsPayableCents: number;
+  baseNetProfitCents: number;
+  adjustmentCents: number;
+  hostCostEstimated: boolean;
+  hostCostOverrideReason?: string;
+  unallocatedRevenueCents: number;
+  reconciliationDifferenceCents: number;
+  state: string;
+};
+
+export type SettlementLine = {
+  id: string;
+  lineType: string;
+  referenceId?: string;
+  accountId?: string;
+  label: string;
+  grossCents: number;
+  amountCents: number;
+  verified: boolean;
+  note?: string;
+};
+
+export type Adjustment = {
+  id: string;
+  settlementId: string;
+  amountCents: number;
+  effect: string;
+  reason: string;
+  beforeReceivableCents: number;
+  beforePayableCents: number;
+  beforeNetProfitCents: number;
+  afterReceivableCents: number;
+  afterPayableCents: number;
+  afterNetProfitCents: number;
+  createdAtEpochMs: number;
+};
+
+export type FinancialReport = {
+  settlement: Settlement;
+  memberCommissions: SettlementLine[];
+  hostCosts: SettlementLine[];
+  expenses: SettlementLine[];
+  adjustments: Adjustment[];
+};

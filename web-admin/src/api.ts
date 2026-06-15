@@ -32,6 +32,20 @@ export async function request<T>(
   return body as T;
 }
 
+export async function requestBlob(
+  path: string,
+  token?: string,
+): Promise<Blob> {
+  const response = await fetch(`${apiBase}${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new ApiError(body.error || `下载失败（${response.status}）`, response.status);
+  }
+  return response.blob();
+}
+
 export const login = (username: string, password: string, otp?: string) =>
   request<Session>("/auth/login", {
     method: "POST",

@@ -1,21 +1,51 @@
-import type { ReportSummary, Shift, Task, Customer } from "../../types";
+import type {
+  Attendance,
+  Customer,
+  MicSegment,
+  ReportSummary,
+  Settlement,
+  Shift,
+  Task,
+} from "../../types";
 import { yuan, localTime } from "../../utils";
 import { Card, Stat, Table } from "../ui";
 
-export function Dashboard({ report, shifts, tasks, customers }: {
-  report: ReportSummary; shifts: Shift[]; tasks: Task[]; customers: Customer[];
+export function Dashboard({ report, shifts, tasks, customers, micSegments, attendance, settlements }: {
+  report: ReportSummary;
+  shifts: Shift[];
+  tasks: Task[];
+  customers: Customer[];
+  micSegments: MicSegment[];
+  attendance: Attendance[];
+  settlements: Settlement[];
 }) {
   const today = new Date().toDateString();
   const todayShifts = shifts.filter((s) => new Date(s.startAtEpochMs).toDateString() === today);
   const openTasks = tasks.filter((t) => !["approved", "cancelled"].includes(t.state));
+  const recentStart = Date.now() - 30 * 86_400_000;
+  const recentProfit = settlements
+    .filter((item) => item.periodEndEpochMs >= recentStart)
+    .reduce((total, item) => total + item.netProfitCents, 0);
+  const verifiedMicSeconds = micSegments
+    .filter((item) => item.state === "closed")
+    .reduce((total, item) => total + item.durationSeconds, 0);
+  const micHours = `${(verifiedMicSeconds / 3600).toFixed(1)} 小时`;
+  const priorityCustomers = customers.filter((customer) => customer.valueLevel !== "standard");
+  const priorityWithTask = new Set(
+    openTasks
+      .filter((task) => priorityCustomers.some((customer) => customer.id === task.customerId))
+      .map((task) => task.customerId),
+  ).size;
   const max = Math.max(...report.dailyTotals.map((d) => d.grossCents), 1);
 
   return <>
     <div className="stats-grid">
       <Stat label="近 30 天总流水" value={yuan(report.grossCents)} detail="仅来自已提交官方账单" />
+      <Stat label="近 30 天净利润" value={yuan(recentProfit)} detail="来自已关闭结算期" />
+      <Stat label="已核验麦时" value={micHours} detail={`${attendance.length} 条成员出勤汇总`} />
       <Stat label="今日班次" value={String(todayShifts.length)} detail={`${shifts.length} 个已登记班次`} />
       <Stat label="待处理作业" value={String(openTasks.length)} detail={`${report.taskApproved} 条已审核通过`} />
-      <Stat label="关系客户" value={String(customers.length)} detail={`${customers.filter((c) => c.valueLevel !== "standard").length} 位重点层级`} />
+      <Stat label="关系客户" value={String(customers.length)} detail={`${priorityWithTask}/${priorityCustomers.length} 位重点层级已有作业`} />
     </div>
     <div className="two-col">
       <Card title="流水趋势" action={<span className="pill">近 30 天</span>}>

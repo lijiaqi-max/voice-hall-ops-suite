@@ -16,7 +16,7 @@ New-Item -ItemType Directory -Force -Path $staging | Out-Null
 foreach ($file in @(".env.example", ".gitignore", "README.md")) {
     Copy-Item -LiteralPath (Join-Path $root $file) -Destination $staging
 }
-foreach ($directory in @("infra", "docs", "migration")) {
+foreach ($directory in @("infra", "docs", "migration", ".github")) {
     Copy-Item -LiteralPath (Join-Path $root $directory) -Destination $staging -Recurse
 }
 
@@ -64,7 +64,10 @@ foreach ($app in @("member-android", "control-android")) {
 }
 
 Copy-Project "scripts" `
-    @("build-all.ps1", "build-finance-samples.mjs", "package-source.ps1") `
+    @(
+        "build-all.ps1", "build-finance-samples.mjs", "package-source.ps1",
+        "reset-demo.ps1", "smoke-web.ps1", "start-demo.ps1", "stop-demo.ps1"
+    ) `
     @()
 
 if (Test-Path $archive) {

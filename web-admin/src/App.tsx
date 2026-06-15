@@ -1,23 +1,35 @@
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { ApiError, request } from "./api";
-import type { Account, Audit, Customer, ReportSummary, Room, Shift, Task } from "./types";
+import { ApiError, request, requestBlob } from "./api";
+import type {
+  Account,
+  Attendance,
+  Audit,
+  Customer,
+  MicSegment,
+  ReportSummary,
+  Room,
+  Settlement,
+  Shift,
+  Task,
+} from "./types";
 import { useSession } from "./hooks/useSession";
 import { Login } from "./components/Login";
 import { AppShell } from "./layouts/AppShell";
-import {
-  Dashboard,
-  RoomsPage,
-  ShiftsPage,
-  MembersPage,
-  CustomersPage,
-  TasksPage,
-  RevenuePage,
-  FinancePage,
-  ReportsPage,
-  AuditPage,
-  SettingsPage,
-} from "./components/pages";
+import { hasPermission } from "./permissions";
+
+const Dashboard = lazy(() => import("./components/pages/Dashboard").then((m) => ({ default: m.Dashboard })));
+const RoomsPage = lazy(() => import("./components/pages/RoomsPage").then((m) => ({ default: m.RoomsPage })));
+const ShiftsPage = lazy(() => import("./components/pages/ShiftsPage").then((m) => ({ default: m.ShiftsPage })));
+const ControlPage = lazy(() => import("./components/pages/ControlPage").then((m) => ({ default: m.ControlPage })));
+const MembersPage = lazy(() => import("./components/pages/MembersPage").then((m) => ({ default: m.MembersPage })));
+const CustomersPage = lazy(() => import("./components/pages/CustomersPage").then((m) => ({ default: m.CustomersPage })));
+const TasksPage = lazy(() => import("./components/pages/TasksPage").then((m) => ({ default: m.TasksPage })));
+const RevenuePage = lazy(() => import("./components/pages/RevenuePage").then((m) => ({ default: m.RevenuePage })));
+const FinancePage = lazy(() => import("./components/pages/FinancePage").then((m) => ({ default: m.FinancePage })));
+const ReportsPage = lazy(() => import("./components/pages/ReportsPage").then((m) => ({ default: m.ReportsPage })));
+const AuditPage = lazy(() => import("./components/pages/AuditPage").then((m) => ({ default: m.AuditPage })));
+const SettingsPage = lazy(() => import("./components/pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
 
 const emptyReport: ReportSummary = {
   periodStartEpochMs: Date.now() - 30 * 86_400_000,
@@ -38,10 +50,17 @@ function AppLayout() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [audit, setAudit] = useState<Audit[]>([]);
+  const [micSegments, setMicSegments] = useState<MicSegment[]>([]);
+  const [attendance, setAttendance] = useState<Attendance[]>([]);
+  const [settlements, setSettlements] = useState<Settlement[]>([]);
   const [report, setReport] = useState<ReportSummary>(emptyReport);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const token = session?.accessToken;
+  const can = useCallback(
+    (permission: string) => hasPermission(session?.permissions ?? [], permission),
+    [session?.permissions],
+  );
 
   const call = useCallback(async <T,>(path: string, options?: RequestInit) => {
     try {
@@ -54,27 +73,55 @@ function AppLayout() {
     }
   }, [token, setSession]);
 
+  const download = useCallback(async (path: string) => {
+    try {
+      setError("");
+      return await requestBlob(path, token);
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 401) setSession(null);
+      setError(reason instanceof Error ? reason.message : "下载失败");
+      throw reason;
+    }
+  }, [token, setSession]);
+
   const loadAll = useCallback(async () => {
     if (!token) return;
-    const [roomData, shiftData, customerData, taskData, reportData] = await Promise.all([
-      call<Room[]>("/rooms"),
-      call<Shift[]>("/shifts"),
-      call<Customer[]>("/customers"),
-      call<Task[]>("/tasks"),
-      call<ReportSummary>(`/reports/summary?start=${Date.now() - 30 * 86_400_000}&end=${Date.now()}`),
+    const [
+      roomData,
+      shiftData,
+      customerData,
+      taskData,
+      reportData,
+      accountData,
+      auditData,
+      micData,
+      attendanceData,
+      settlementData,
+    ] = await Promise.all([
+      can("rooms.read") ? call<Room[]>("/rooms") : Promise.resolve([]),
+      can("shifts.read") ? call<Shift[]>("/shifts") : Promise.resolve([]),
+      can("customers.read") ? call<Customer[]>("/customers") : Promise.resolve([]),
+      can("tasks.read") ? call<Task[]>("/tasks") : Promise.resolve([]),
+      can("reports.read")
+        ? call<ReportSummary>(`/reports/summary?start=${Date.now() - 30 * 86_400_000}&end=${Date.now()}`)
+        : Promise.resolve(emptyReport),
+      can("rooms.write") ? call<Account[]>("/accounts") : Promise.resolve([]),
+      can("audit.read") ? call<Audit[]>("/audit?limit=100") : Promise.resolve([]),
+      can("mic.read") ? call<MicSegment[]>("/mic-segments") : Promise.resolve([]),
+      can("mic.read") ? call<Attendance[]>("/attendance") : Promise.resolve([]),
+      can("finance.read") ? call<Settlement[]>("/settlements") : Promise.resolve([]),
     ]);
     setRooms(roomData);
     setShifts(shiftData);
     setCustomers(customerData);
     setTasks(taskData);
     setReport(reportData);
-    if (session?.permissions.includes("*") || session?.permissions.includes("rooms.write")) {
-      setAccounts(await call<Account[]>("/accounts"));
-    }
-    if (session?.permissions.includes("*") || session?.permissions.includes("audit.read")) {
-      setAudit(await call<Audit[]>("/audit?limit=100"));
-    }
-  }, [token, call, session?.permissions]);
+    setAccounts(accountData);
+    setAudit(auditData);
+    setMicSegments(micData);
+    setAttendance(attendanceData);
+    setSettlements(settlementData);
+  }, [token, call, can]);
 
   useEffect(() => { loadAll().catch(() => undefined); }, [loadAll]);
 
@@ -85,6 +132,9 @@ function AppLayout() {
 
   if (!session) return <Login onLogin={setSession} />;
 
+  const guarded = (permission: string, page: React.ReactNode) =>
+    can(permission) ? page : <Navigate to="/" replace />;
+
   return (
     <AppShell
       session={session}
@@ -93,20 +143,31 @@ function AppLayout() {
       onLogout={() => setSession(null)}
       onRefresh={() => loadAll()}
     >
-      <Routes>
-        <Route path="/" element={<Dashboard report={report} shifts={shifts} tasks={tasks} customers={customers} />} />
-        <Route path="/rooms" element={<RoomsPage rooms={rooms} call={call} reload={loadAll} notify={notify} />} />
-        <Route path="/shifts" element={<ShiftsPage rooms={rooms} accounts={accounts} shifts={shifts} call={call} reload={loadAll} notify={notify} />} />
-        <Route path="/members" element={<MembersPage accounts={accounts} rooms={rooms} call={call} reload={loadAll} notify={notify} />} />
-        <Route path="/customers" element={<CustomersPage customers={customers} call={call} reload={loadAll} notify={notify} />} />
-        <Route path="/tasks" element={<TasksPage tasks={tasks} rooms={rooms} customers={customers} accounts={accounts} call={call} reload={loadAll} notify={notify} />} />
-        <Route path="/revenue" element={<RevenuePage rooms={rooms} call={call} reload={loadAll} notify={notify} />} />
-        <Route path="/finance" element={<FinancePage rooms={rooms} call={call} notify={notify} />} />
-        <Route path="/reports" element={<ReportsPage report={report} call={call} onReport={setReport} />} />
-        <Route path="/audit" element={<AuditPage audit={audit} />} />
-        <Route path="/settings" element={<SettingsPage call={call} notify={notify} />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <Suspense fallback={<div className="card empty large">正在加载页面…</div>}>
+        <Routes>
+          <Route path="/" element={<Dashboard
+            report={report}
+            shifts={shifts}
+            tasks={tasks}
+            customers={customers}
+            micSegments={micSegments}
+            attendance={attendance}
+            settlements={settlements}
+          />} />
+          <Route path="/rooms" element={guarded("rooms.read", <RoomsPage rooms={rooms} call={call} reload={loadAll} notify={notify} />)} />
+          <Route path="/shifts" element={guarded("shifts.read", <ShiftsPage rooms={rooms} accounts={accounts} shifts={shifts} call={call} reload={loadAll} notify={notify} />)} />
+          <Route path="/control" element={guarded("mic.read", <ControlPage rooms={rooms} call={call} canManageDevices={can("devices.write")} />)} />
+          <Route path="/members" element={guarded("rooms.write", <MembersPage accounts={accounts} rooms={rooms} call={call} reload={loadAll} notify={notify} />)} />
+          <Route path="/customers" element={guarded("customers.read", <CustomersPage customers={customers} call={call} reload={loadAll} notify={notify} />)} />
+          <Route path="/tasks" element={guarded("tasks.read", <TasksPage tasks={tasks} rooms={rooms} customers={customers} accounts={accounts} call={call} reload={loadAll} notify={notify} />)} />
+          <Route path="/revenue" element={guarded("revenue.write", <RevenuePage rooms={rooms} call={call} reload={loadAll} notify={notify} />)} />
+          <Route path="/finance" element={guarded("finance.read", <FinancePage rooms={rooms} call={call} download={download} notify={notify} />)} />
+          <Route path="/reports" element={guarded("reports.read", <ReportsPage report={report} call={call} onReport={setReport} />)} />
+          <Route path="/audit" element={guarded("audit.read", <AuditPage audit={audit} />)} />
+          <Route path="/settings" element={guarded("rooms.write", <SettingsPage call={call} notify={notify} />)} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Suspense>
     </AppShell>
   );
 }
