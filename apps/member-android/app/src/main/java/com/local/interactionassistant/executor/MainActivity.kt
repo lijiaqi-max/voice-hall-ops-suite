@@ -46,6 +46,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.local.interactionassistant.executor.data.CloudConfigEntity
 import com.local.interactionassistant.executor.data.CloudTaskEntity
+import com.local.interactionassistant.executor.cloud.MemberStats
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MemberCloudViewModel by viewModels()
@@ -77,6 +78,9 @@ private val tabs = listOf(
 private fun MemberCloudApp(viewModel: MemberCloudViewModel) {
     val config by viewModel.config.collectAsState()
     val tasks by viewModel.tasks.collectAsState()
+    val pendingCount by viewModel.pendingCount.collectAsState()
+    val conflictCount by viewModel.conflictCount.collectAsState()
+    val stats by viewModel.stats.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val message by viewModel.message.collectAsState()
     val loggedIn = config?.accessToken?.isNotBlank() == true
@@ -91,7 +95,8 @@ private fun MemberCloudApp(viewModel: MemberCloudViewModel) {
     val selectedTask = tasks.firstOrNull { it.id == selectedTaskId }
 
     Column(modifier = Modifier.fillMaxSize().background(Color(0xFFF4F6F2))) {
-        MemberHeader(config, busy, viewModel::sync, viewModel::logout)
+        MemberHeader(config, busy, pendingCount, conflictCount, viewModel::sync, viewModel::logout)
+        config?.lastSyncError?.let { MessageBanner("最近同步：$it", true) }
         message?.let {
             MessageBanner(it, it.contains("失败") || it.contains("请先") || it.contains("返回"))
         }
@@ -111,7 +116,7 @@ private fun MemberCloudApp(viewModel: MemberCloudViewModel) {
                 })
                 3 -> AdvicePage(selectedTask, viewModel)
                 4 -> CompletedPage(tasks)
-                5 -> StatsPage(tasks, viewModel::uploadLegacy)
+                5 -> StatsPage(stats, pendingCount, conflictCount, viewModel::uploadLegacy)
             }
         }
         NavigationBar {
@@ -131,11 +136,12 @@ private fun MemberCloudApp(viewModel: MemberCloudViewModel) {
 private fun LoginScreen(
     busy: Boolean,
     message: String?,
-    login: (String, String, String) -> Unit,
+    login: (String, String, String, String) -> Unit,
 ) {
     var baseUrl by remember { mutableStateOf("") }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var otp by remember { mutableStateOf("") }
     Box(
         modifier = Modifier.fillMaxSize().background(Color(0xFF123A2F)).padding(24.dp),
         contentAlignment = Alignment.Center,
@@ -177,9 +183,17 @@ private fun LoginScreen(
                     visualTransformation = PasswordVisualTransformation(),
                     singleLine = true,
                 )
+                OutlinedTextField(
+                    value = otp,
+                    onValueChange = { otp = it.filter(Char::isDigit).take(6) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("TOTP（账号启用时填写）") },
+                    placeholder = { Text("6 位动态码") },
+                    singleLine = true,
+                )
                 message?.let { MessageBanner(it, true) }
                 Button(
-                    onClick = { login(baseUrl, username, password) },
+                    onClick = { login(baseUrl, username, password, otp) },
                     enabled = !busy && baseUrl.isNotBlank() && username.isNotBlank() && password.isNotBlank(),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -199,6 +213,8 @@ private fun LoginScreen(
 private fun MemberHeader(
     config: CloudConfigEntity?,
     busy: Boolean,
+    pendingCount: Int,
+    conflictCount: Int,
     sync: () -> Unit,
     logout: () -> Unit,
 ) {
@@ -209,7 +225,11 @@ private fun MemberHeader(
         Column(modifier = Modifier.weight(1f)) {
             Text("今日关系作业", color = Color.White, fontWeight = FontWeight.Bold)
             Text(
-                "${config?.displayName.orEmpty()} · ${config?.role.orEmpty()}",
+                buildString {
+                    append("${config?.displayName.orEmpty()} · ${config?.role.orEmpty()}")
+                    if (pendingCount > 0) append(" · 待同步 $pendingCount")
+                    if (conflictCount > 0) append(" · 冲突 $conflictCount")
+                },
                 color = Color(0xFFB9D4C9),
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -319,6 +339,7 @@ private fun CustomerPage(tasks: List<CloudTaskEntity>, onSelect: (CloudTaskEntit
 
 @Composable
 private fun AdvicePage(task: CloudTaskEntity?, viewModel: MemberCloudViewModel) {
+    val adviceByTask by viewModel.advice.collectAsState()
     if (task == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("请先从今日作业或任务池选择客户", color = Color(0xFF78847E))
@@ -326,6 +347,7 @@ private fun AdvicePage(task: CloudTaskEntity?, viewModel: MemberCloudViewModel) 
         return
     }
     var showSubmit by remember(task.id) { mutableStateOf(false) }
+    val advice = adviceByTask[task.id]
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -344,7 +366,40 @@ private fun AdvicePage(task: CloudTaskEntity?, viewModel: MemberCloudViewModel) 
             }
         }
         item {
+            Card {
+                Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("脱敏交流建议", fontWeight = FontWeight.Bold)
+                    if (advice == null) {
+                        Text("只发送关系阶段、互动时间区间、价值等级、任务目的和语气。")
+                        OutlinedButton(onClick = { viewModel.generateAdvice(task.id) }) {
+                            Text("生成建议")
+                        }
+                    } else {
+                        Text(advice.advice)
+                        Text(
+                            if (advice.fallbackUsed) "规则模板兜底" else "AI 建议",
+                            color = Color(0xFF6B7872),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        if (advice.riskTags.isNotEmpty()) {
+                            Text(
+                                "已拦截风险：${advice.riskTags.joinToString("、")}",
+                                color = Color(0xFF9B2C2C),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Text("必须由成员人工确认后使用。", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+        item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (task.syncState == "conflict") {
+                    OutlinedButton(onClick = { viewModel.discardConflict(task.id) }) {
+                        Text("放弃本地冲突并刷新")
+                    }
+                }
                 if (task.state == "claimed" || task.state == "rejected") {
                     Button(onClick = { viewModel.start(task.id) }) { Text("开始人工交流") }
                 }
@@ -430,10 +485,12 @@ private fun CompletedPage(tasks: List<CloudTaskEntity>) {
 }
 
 @Composable
-private fun StatsPage(tasks: List<CloudTaskEntity>, uploadLegacy: () -> Unit) {
-    val approved = tasks.count { it.state == "approved" }
-    val submitted = tasks.count { it.state == "submitted" }
-    val active = tasks.count { it.state in setOf("assigned", "claimed", "in_progress") }
+private fun StatsPage(
+    stats: MemberStats?,
+    pendingCount: Int,
+    conflictCount: Int,
+    uploadLegacy: () -> Unit,
+) {
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -441,9 +498,20 @@ private fun StatsPage(tasks: List<CloudTaskEntity>, uploadLegacy: () -> Unit) {
         item { Text("个人统计", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold) }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                StatCard("待办", active.toString(), Modifier.weight(1f))
-                StatCard("待审核", submitted.toString(), Modifier.weight(1f))
-                StatCard("已通过", approved.toString(), Modifier.weight(1f))
+                StatCard("已领取", (stats?.claimedCount ?: 0).toString(), Modifier.weight(1f))
+                StatCard("已提交", (stats?.submittedCount ?: 0).toString(), Modifier.weight(1f))
+                StatCard("已通过", (stats?.approvedCount ?: 0).toString(), Modifier.weight(1f))
+            }
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                StatCard("待同步", pendingCount.toString(), Modifier.weight(1f))
+                StatCard("冲突", conflictCount.toString(), Modifier.weight(1f))
+                StatCard(
+                    "回访完成率",
+                    "${(stats?.followUpCompletionRateBps ?: 0) / 100}%",
+                    Modifier.weight(1f),
+                )
             }
         }
         item {
@@ -477,6 +545,17 @@ private fun TaskCard(
             }
             Text(task.title, fontWeight = FontWeight.SemiBold)
             Text(task.brief, color = Color(0xFF65716C), maxLines = 3)
+            if (task.syncState != "synced") {
+                Text(
+                    when (task.syncState) {
+                        "pending" -> "待同步：服务端确认前不会显示为已完成"
+                        "conflict" -> "同步冲突：${task.conflictMessage ?: "请刷新后联系管理员"}"
+                        else -> task.syncState
+                    },
+                    color = if (task.syncState == "conflict") Color(0xFF9B2C2C) else Color(0xFF8A641A),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("优先级 ${task.priority}", style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.width(8.dp))

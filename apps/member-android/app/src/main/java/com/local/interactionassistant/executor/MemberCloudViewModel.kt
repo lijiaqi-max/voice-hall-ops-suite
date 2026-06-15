@@ -3,6 +3,8 @@ package com.local.interactionassistant.executor
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.local.interactionassistant.executor.cloud.TaskSubmission
+import com.local.interactionassistant.executor.cloud.MemberAdvice
+import com.local.interactionassistant.executor.cloud.MemberStats
 import com.local.interactionassistant.executor.data.CloudConfigEntity
 import com.local.interactionassistant.executor.data.CloudTaskEntity
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -25,6 +27,16 @@ class MemberCloudViewModel : ViewModel() {
         SharingStarted.WhileSubscribed(5_000),
         emptyList(),
     )
+    val pendingCount: StateFlow<Int> = repository.pendingCount.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000),
+        0,
+    )
+    val conflictCount: StateFlow<Int> = repository.conflictCount.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000),
+        0,
+    )
 
     private val _busy = MutableStateFlow(false)
     val busy = _busy.asStateFlow()
@@ -32,21 +44,42 @@ class MemberCloudViewModel : ViewModel() {
     private val _message = MutableStateFlow<String?>(null)
     val message = _message.asStateFlow()
 
-    fun login(baseUrl: String, username: String, password: String) =
-        launch("登录成功，任务已同步") { repository.login(baseUrl, username, password) }
+    private val _advice = MutableStateFlow<Map<String, MemberAdvice>>(emptyMap())
+    val advice = _advice.asStateFlow()
+
+    private val _stats = MutableStateFlow<MemberStats?>(null)
+    val stats = _stats.asStateFlow()
+
+    fun login(baseUrl: String, username: String, password: String, otp: String) =
+        launch("登录成功，任务已同步") {
+            repository.login(baseUrl, username, password, otp.ifBlank { null })
+            _stats.value = repository.personalStats()
+        }
 
     fun logout() = launch("已退出账号") { repository.logout() }
 
-    fun sync() = launch("同步完成") { repository.sync() }
+    fun sync() = launch("同步完成") {
+        repository.sync()
+        _stats.value = repository.personalStats()
+    }
 
-    fun claim(taskId: String) = launch("作业已领取") { repository.claim(taskId) }
+    fun claim(taskId: String) = launch("操作已提交，请确认同步状态") { repository.claim(taskId) }
 
-    fun start(taskId: String) = launch("已开始作业") { repository.start(taskId) }
+    fun start(taskId: String) = launch("操作已提交，请确认同步状态") { repository.start(taskId) }
 
     fun submit(taskId: String, channel: String, note: String, nextFollowUpAt: Long?) =
-        launch("作业已提交审核") {
+        launch("操作已提交，请确认同步状态") {
             repository.submit(taskId, TaskSubmission(channel, note, nextFollowUpAt))
         }
+
+    fun generateAdvice(taskId: String) = launch("交流建议已生成，请人工确认") {
+        _advice.value = _advice.value + (taskId to repository.generateAdvice(taskId))
+    }
+
+    fun discardConflict(taskId: String) = launch("本地冲突操作已放弃，作业已重新同步") {
+        repository.discardConflictAndSync(taskId)
+        _stats.value = repository.personalStats()
+    }
 
     fun uploadLegacy() = launch("旧关系数据已上传到迁移暂存区") {
         repository.uploadLegacyPreview()

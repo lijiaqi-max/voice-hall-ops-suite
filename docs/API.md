@@ -21,6 +21,8 @@
 - `GET/POST /customers`
 - `GET/POST /tasks`
 - `POST /tasks/{id}/claim|start|submit|approve|reject|cancel`
+- `GET /tasks-stats/me`
+- `POST /advice/generate`
 - `GET /revenue-imports`
 - `POST /revenue-imports/preview`
 - `POST /revenue-imports/{id}/commit`
@@ -52,6 +54,10 @@ ID 幂等处理。
 应收调整处理），记录调整前后应收、应付和净利润。结算表始终满足
 `应收 - 应付 - 净利润 = 0`。XLSX 导出包含经营汇总、成员佣金、主持成本、
 调整与支出四张工作表。
+
+`POST /advice/generate` 只接收关系阶段、互动时间区间、价值等级、任务目的和
+语气。服务端不会接收用户 ID、联系方式或精确流水；未配置 AI 服务或输出命中
+索礼、消费施压、虚假亲密、频繁催促风险时返回规则模板，并始终要求人工确认。
 
 ## 厅控设备
 

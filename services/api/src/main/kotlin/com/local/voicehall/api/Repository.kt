@@ -644,6 +644,40 @@ class OpsRepository(
             }
         }
 
+    fun memberTaskStats(identity: RequestIdentity): MemberTaskStats =
+        dataSource.connection { connection ->
+            connection.prepareStatement(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN claimed_at IS NOT NULL THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN submitted_at IS NOT NULL THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN state='approved' THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN state='approved' AND result_channel IS NOT NULL THEN 1 ELSE 0 END),0)
+                FROM tasks
+                WHERE organization_id=? AND assigned_account_id=?
+                """.trimIndent(),
+            ).use {
+                it.setString(1, identity.organizationId)
+                it.setString(2, identity.accountId)
+                it.executeQuery().use { rows ->
+                    rows.next()
+                    val claimed = rows.getInt(1)
+                    val submitted = rows.getInt(2)
+                    val approved = rows.getInt(3)
+                    val followUpCompleted = rows.getInt(4)
+                    MemberTaskStats(
+                        claimedCount = claimed,
+                        submittedCount = submitted,
+                        approvedCount = approved,
+                        followUpCompletedCount = followUpCompleted,
+                        followUpCompletionRateBps = if (claimed == 0) 0 else {
+                            ((followUpCompleted.toLong() * 10_000L) / claimed).toInt()
+                        },
+                    )
+                }
+            }
+        }
+
     fun createTask(identity: RequestIdentity, input: TaskInput): TaskView =
         dataSource.transaction { connection ->
             input.roomId?.let { requireRoomAccess(connection, identity, it) }

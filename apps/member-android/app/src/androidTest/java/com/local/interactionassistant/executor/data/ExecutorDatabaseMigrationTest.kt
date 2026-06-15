@@ -248,10 +248,77 @@ class ExecutorDatabaseMigrationTest {
         db.close()
     }
 
+    @Test
+    fun migrateSixToSevenPreservesCloudDataAndAddsReliableSyncState() {
+        helper.createDatabase(DB_NAME_V6, 6).apply {
+            execSQL(
+                """
+                INSERT INTO cloud_config
+                (id,baseUrl,username,accessToken,accountId,displayName,role,updatedAtEpochMs)
+                VALUES (1,'https://ops.example.com/api','member','legacy-token','account-1','成员甲','member',100)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO cloud_tasks
+                (id,roomId,customerId,customerName,title,brief,state,priority,assignedAccountId,
+                 resultChannel,resultNote,nextFollowUpAtEpochMs,valueLevel,visibleRevenueCents,updatedAtEpochMs)
+                VALUES ('task-1','room-1','customer-1','客户甲','回访','人工完成','assigned',10,
+                        'account-1',NULL,NULL,NULL,'important',NULL,100)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO cloud_outbox
+                (id,method,path,bodyJson,dedupeKey,attemptCount,lastError,createdAtEpochMs)
+                VALUES ('operation-1','POST','/tasks/task-1/claim','','dedupe-1',0,NULL,100)
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        val db = helper.runMigrationsAndValidate(
+            DB_NAME_V6,
+            7,
+            true,
+            ExecutorDatabase.MIGRATION_6_7,
+        )
+        db.query(
+            """
+            SELECT accessToken,refreshToken,authState,accessTokenExpiresAtEpochMs
+            FROM cloud_config WHERE id=1
+            """.trimIndent(),
+        ).use {
+            it.moveToFirst()
+            assertEquals("legacy-token", it.getString(0))
+            assertEquals("", it.getString(1))
+            assertEquals("authenticated", it.getString(2))
+            assertEquals(0, it.getLong(3))
+        }
+        db.query(
+            "SELECT serverVersion,syncState,pendingOperationId FROM cloud_tasks WHERE id='task-1'",
+        ).use {
+            it.moveToFirst()
+            assertEquals(0, it.getInt(0))
+            assertEquals("synced", it.getString(1))
+            assertEquals(null, it.getString(2))
+        }
+        db.query(
+            "SELECT operationId,action,state FROM cloud_outbox WHERE id='operation-1'",
+        ).use {
+            it.moveToFirst()
+            assertEquals("operation-1", it.getString(0))
+            assertEquals("unknown", it.getString(1))
+            assertEquals("pending", it.getString(2))
+        }
+        db.close()
+    }
+
     companion object {
         private const val DB_NAME = "migration-test"
         private const val DB_NAME_V3 = "migration-test-v3"
         private const val DB_NAME_V4 = "migration-test-v4"
         private const val DB_NAME_V5 = "migration-test-v5"
+        private const val DB_NAME_V6 = "migration-test-v6"
     }
 }

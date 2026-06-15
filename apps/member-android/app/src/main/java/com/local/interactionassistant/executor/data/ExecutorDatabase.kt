@@ -849,6 +849,9 @@ interface ExecutorDao {
     @Query("SELECT * FROM cloud_tasks WHERE id = :id LIMIT 1")
     suspend fun getCloudTask(id: String): CloudTaskEntity?
 
+    @Query("SELECT * FROM cloud_tasks")
+    suspend fun getAllCloudTasks(): List<CloudTaskEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertCloudTasks(tasks: List<CloudTaskEntity>)
 
@@ -861,17 +864,57 @@ interface ExecutorDao {
     @Query("SELECT * FROM cloud_outbox ORDER BY createdAtEpochMs ASC")
     suspend fun getCloudOutbox(): List<CloudOutboxEntity>
 
+    @Query("SELECT * FROM cloud_outbox WHERE state IN ('pending','failed') ORDER BY createdAtEpochMs ASC")
+    suspend fun getPendingCloudOutbox(): List<CloudOutboxEntity>
+
+    @Query("SELECT COUNT(*) FROM cloud_outbox WHERE state IN ('pending','failed')")
+    fun observePendingCloudRequestCount(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM cloud_tasks WHERE syncState = 'conflict'")
+    fun observeCloudConflictCount(): Flow<Int>
+
     @Query("DELETE FROM cloud_outbox WHERE id = :id")
     suspend fun deleteCloudOutbox(id: String)
+
+    @Query("DELETE FROM cloud_outbox WHERE taskId = :taskId AND state = 'conflict'")
+    suspend fun deleteCloudTaskConflicts(taskId: String)
 
     @Query(
         """
         UPDATE cloud_outbox
-        SET attemptCount = attemptCount + 1, lastError = :error
+        SET attemptCount = attemptCount + 1, state = 'failed', lastError = :error
         WHERE id = :id
         """,
     )
     suspend fun markCloudOutboxFailed(id: String, error: String)
+
+    @Query(
+        """
+        UPDATE cloud_outbox
+        SET attemptCount = attemptCount + 1, state = 'conflict', lastError = :error
+        WHERE id = :id
+        """,
+    )
+    suspend fun markCloudOutboxConflict(id: String, error: String)
+
+    @Query(
+        """
+        UPDATE cloud_tasks
+        SET syncState = :syncState, pendingOperationId = :operationId,
+            conflictMessage = :conflictMessage, updatedAtEpochMs = :updatedAt
+        WHERE id = :taskId
+        """,
+    )
+    suspend fun updateCloudTaskSyncState(
+        taskId: String,
+        syncState: String,
+        operationId: String?,
+        conflictMessage: String?,
+        updatedAt: Long,
+    )
+
+    @Query("DELETE FROM cloud_outbox")
+    suspend fun clearCloudOutbox()
 
     @Query("DELETE FROM task_assets")
     suspend fun clearTaskAssets()
@@ -967,7 +1010,7 @@ interface ExecutorDao {
         CloudTaskEntity::class,
         CloudOutboxEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 abstract class ExecutorDatabase : RoomDatabase() {
@@ -986,6 +1029,7 @@ abstract class ExecutorDatabase : RoomDatabase() {
                     MIGRATION_3_4,
                     MIGRATION_4_5,
                     MIGRATION_5_6,
+                    MIGRATION_6_7,
                 )
                 .build()
 
@@ -1380,6 +1424,57 @@ abstract class ExecutorDatabase : RoomDatabase() {
                 )
                 db.execSQL(
                     "CREATE UNIQUE INDEX IF NOT EXISTS index_cloud_outbox_dedupeKey ON cloud_outbox(dedupeKey)",
+                )
+            }
+        }
+
+        internal val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE cloud_config ADD COLUMN refreshToken TEXT NOT NULL DEFAULT ''")
+                db.execSQL(
+                    "ALTER TABLE cloud_config ADD COLUMN accessTokenExpiresAtEpochMs INTEGER NOT NULL DEFAULT 0",
+                )
+                db.execSQL(
+                    "ALTER TABLE cloud_config ADD COLUMN refreshTokenExpiresAtEpochMs INTEGER NOT NULL DEFAULT 0",
+                )
+                db.execSQL(
+                    "ALTER TABLE cloud_config ADD COLUMN authState TEXT NOT NULL DEFAULT 'signed_out'",
+                )
+                db.execSQL("ALTER TABLE cloud_config ADD COLUMN lastSyncAtEpochMs INTEGER")
+                db.execSQL("ALTER TABLE cloud_config ADD COLUMN lastSyncError TEXT")
+                db.execSQL(
+                    "UPDATE cloud_config SET authState='authenticated' WHERE accessToken<>''",
+                )
+
+                db.execSQL(
+                    "ALTER TABLE cloud_tasks ADD COLUMN serverVersion INTEGER NOT NULL DEFAULT 0",
+                )
+                db.execSQL(
+                    "ALTER TABLE cloud_tasks ADD COLUMN syncState TEXT NOT NULL DEFAULT 'synced'",
+                )
+                db.execSQL("ALTER TABLE cloud_tasks ADD COLUMN pendingOperationId TEXT")
+                db.execSQL("ALTER TABLE cloud_tasks ADD COLUMN conflictMessage TEXT")
+
+                db.execSQL(
+                    "ALTER TABLE cloud_outbox ADD COLUMN operationId TEXT NOT NULL DEFAULT ''",
+                )
+                db.execSQL("ALTER TABLE cloud_outbox ADD COLUMN taskId TEXT")
+                db.execSQL(
+                    "ALTER TABLE cloud_outbox ADD COLUMN action TEXT NOT NULL DEFAULT 'unknown'",
+                )
+                db.execSQL("ALTER TABLE cloud_outbox ADD COLUMN expectedVersion INTEGER")
+                db.execSQL(
+                    "ALTER TABLE cloud_outbox ADD COLUMN state TEXT NOT NULL DEFAULT 'pending'",
+                )
+                db.execSQL("UPDATE cloud_outbox SET operationId=id WHERE operationId=''")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_cloud_outbox_taskId ON cloud_outbox(taskId)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_cloud_outbox_state ON cloud_outbox(state)",
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_cloud_outbox_operationId ON cloud_outbox(operationId)",
                 )
             }
         }

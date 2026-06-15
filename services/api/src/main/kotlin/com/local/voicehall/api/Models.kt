@@ -336,6 +336,32 @@ data class FinancialReport(
 )
 
 @Serializable
+data class AdviceRequest(
+    val relationshipStage: String,
+    val interactionRecencyBucket: String,
+    val valueLevel: String,
+    val taskPurpose: String,
+    val tone: String = "温和",
+)
+
+@Serializable
+data class AdviceResult(
+    val advice: String,
+    val riskTags: List<String>,
+    val fallbackUsed: Boolean,
+    val humanConfirmationRequired: Boolean = true,
+)
+
+@Serializable
+data class MemberTaskStats(
+    val claimedCount: Int,
+    val submittedCount: Int,
+    val approvedCount: Int,
+    val followUpCompletedCount: Int,
+    val followUpCompletionRateBps: Int,
+)
+
+@Serializable
 data class ValueLevelRuleInput(
     val code: String,
     val label: String,

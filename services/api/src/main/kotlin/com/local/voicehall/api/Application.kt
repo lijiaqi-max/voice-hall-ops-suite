@@ -68,6 +68,12 @@ fun Application.module(
         env["DEVICE_MASTER_KEY"] ?: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
     )
     val repository = OpsRepository(dataSource, deviceCrypto)
+    val adviceService = AdviceService(
+        baseUrl = env["AI_BASE_URL"],
+        apiKey = env["AI_API_KEY"],
+        model = env["AI_MODEL"] ?: "gpt-4.1-mini",
+        json = jsonCodec,
+    )
     val appLog = environment.log
     repository.bootstrap(
         organizationName = env["BOOTSTRAP_ORG"] ?: "默认语音厅组织",
@@ -388,6 +394,10 @@ fun Application.module(
                     call.respond(repository.transitionTask(call.identity(), call.requiredId(), "cancel"))
                 }
             }
+            get("/tasks-stats/me") {
+                call.requirePermission("tasks.read")
+                call.respond(repository.memberTaskStats(call.identity()))
+            }
             route("/revenue-imports") {
                 get {
                     call.requirePermission("finance.read")
@@ -461,6 +471,10 @@ fun Application.module(
                     FinanceWorkbook.generate(report),
                     ContentType.parse("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
                 )
+            }
+            post("/advice/generate") {
+                call.requirePermission("tasks.read")
+                call.respond(adviceService.generate(call.receive()))
             }
             route("/devices") {
                 get {
