@@ -6,8 +6,8 @@
 
 - 后台：14 项测试、`buildFatJar` 和发布 JAR 独立健康检查通过。
 - 管理台：15 项 Vitest、TypeScript 和 Vite 生产构建通过；前端代理冒烟覆盖登录、刷新令牌轮换、注销、厅控和财务接口。
-- 成员端：19 项 JVM 测试和签名 release 构建通过；Room `6 → 7` 迁移源码可编译。
-- 厅控端：11 项 JVM 测试和签名 release 构建通过；Room 迁移、排麦、主持插入、10 秒防抖和事件同步测试通过。
+- 成员端：19 项 JVM 测试、`lintRelease`、debug instrumentation Kotlin 编译和签名 release 构建通过；Room `6 → 7` 迁移源码可编译。
+- 厅控端：11 项 JVM 测试、`lintRelease`、debug instrumentation Kotlin 编译和签名 release 构建通过；Room 迁移、排麦、主持插入、10 秒防抖和事件同步测试通过。
 - 财务：全程整数分/`BigInteger`，随机属性测试验证固定勾稽公式；演示结算总流水 512,300 分、净利润 225,599 分、勾稽差额 0。
 - 厅控投影：绑定、队列、麦时和出勤事件按事件 ID 幂等处理，页面不可读时停止推算。
 - 演示环境：`reset-demo.ps1` 可重建独立 H2 数据库；`start-demo.ps1`、API 代理健康检查和 `stop-demo.ps1` 已通过。
