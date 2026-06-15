@@ -21,11 +21,17 @@
 - `GET/POST /customers`
 - `GET/POST /tasks`
 - `POST /tasks/{id}/claim|start|submit|approve|reject|cancel`
+- `GET /revenue-imports`
 - `POST /revenue-imports/preview`
 - `POST /revenue-imports/{id}/commit`
-- `POST /settlements/rules|expenses|preview|close`
+- `GET /settlements`
+- `GET/POST /settlements/rules`
+- `GET/POST /settlements/expenses`
+- `POST /settlements/preview|close`
 - `POST /settlements/{id}/adjustments`
 - `GET /reports/summary`
+- `GET /reports/finance/{settlementId}`
+- `GET /reports/export.xlsx?settlementId=...`
 - `GET /audit`
 - `POST /migration/legacy`
 
@@ -36,6 +42,16 @@
 作业响应包含递增的 `version`。成员端可在领取或开始作业时传 `expectedVersion`
 查询参数，并使用 `X-Client-Operation-Id` 提供客户端操作 ID；重复操作会按该
 ID 幂等处理。
+
+财务计算只使用整数分、整数基点和 `BigInteger` 中间值。主持费用优先采用状态为
+`closed` 的已核验主持麦时；没有可信麦时时，试算标记 `hostCostEstimated=true`，
+正式关账必须提交 `hostCostOverrideReason`。账期内仍有未归属成员的流水时禁止
+关账。
+
+调整单支持 `receivable`、`payable`、`expense` 三类效果（兼容输入 `net`，按
+应收调整处理），记录调整前后应收、应付和净利润。结算表始终满足
+`应收 - 应付 - 净利润 = 0`。XLSX 导出包含经营汇总、成员佣金、主持成本、
+调整与支出四张工作表。
 
 ## 厅控设备
 

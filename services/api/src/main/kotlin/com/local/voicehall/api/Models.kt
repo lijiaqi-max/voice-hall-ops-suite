@@ -203,15 +203,31 @@ data class SettlementPreviewRequest(
     val periodStartEpochMs: Long,
     val periodEndEpochMs: Long,
     val ruleId: String? = null,
+    val hostCostOverrideReason: String? = null,
 )
 
 @Serializable
 data class SettlementRuleInput(
     val name: String,
+    val roomId: String? = null,
+    val role: String = "all",
     val effectiveFromEpochMs: Long,
     val platformRateBps: Int,
     val organizationShareBps: Int,
     val memberCommissionBps: Int,
+)
+
+@Serializable
+data class SettlementRuleView(
+    val id: String,
+    val name: String,
+    val roomId: String? = null,
+    val role: String,
+    val effectiveFromEpochMs: Long,
+    val platformRateBps: Int,
+    val organizationShareBps: Int,
+    val memberCommissionBps: Int,
+    val active: Boolean,
 )
 
 @Serializable
@@ -230,11 +246,39 @@ data class SettlementView(
     val accountsReceivableCents: Long,
     val accountsPayableCents: Long,
     val netProfitCents: Long,
+    val baseAccountsReceivableCents: Long = accountsReceivableCents,
+    val baseAccountsPayableCents: Long = accountsPayableCents,
+    val baseNetProfitCents: Long = netProfitCents,
+    val adjustmentCents: Long = 0,
+    val hostCostEstimated: Boolean = false,
+    val hostCostOverrideReason: String? = null,
+    val unallocatedRevenueCents: Long = 0,
+    val reconciliationDifferenceCents: Long = accountsReceivableCents - accountsPayableCents - netProfitCents,
     val state: String,
 )
 
 @Serializable
-data class AdjustmentInput(val amountCents: Long, val reason: String)
+data class AdjustmentInput(
+    val amountCents: Long,
+    val reason: String,
+    val effect: String = "net",
+)
+
+@Serializable
+data class AdjustmentView(
+    val id: String,
+    val settlementId: String,
+    val amountCents: Long,
+    val effect: String,
+    val reason: String,
+    val beforeReceivableCents: Long,
+    val beforePayableCents: Long,
+    val beforeNetProfitCents: Long,
+    val afterReceivableCents: Long,
+    val afterPayableCents: Long,
+    val afterNetProfitCents: Long,
+    val createdAtEpochMs: Long,
+)
 
 @Serializable
 data class ExpenseInput(
@@ -243,6 +287,52 @@ data class ExpenseInput(
     val amountCents: Long,
     val note: String,
     val occurredAtEpochMs: Long,
+)
+
+@Serializable
+data class ExpenseView(
+    val id: String,
+    val roomId: String? = null,
+    val category: String,
+    val amountCents: Long,
+    val note: String,
+    val occurredAtEpochMs: Long,
+)
+
+@Serializable
+data class RevenueImportView(
+    val id: String,
+    val fileName: String,
+    val fileSha256: String,
+    val expectedTotalCents: Long,
+    val calculatedTotalCents: Long,
+    val rowCount: Int,
+    val duplicateCount: Int,
+    val state: String,
+    val createdAtEpochMs: Long,
+    val committedAtEpochMs: Long? = null,
+)
+
+@Serializable
+data class SettlementLineView(
+    val id: String,
+    val lineType: String,
+    val referenceId: String? = null,
+    val accountId: String? = null,
+    val label: String,
+    val grossCents: Long,
+    val amountCents: Long,
+    val verified: Boolean,
+    val note: String? = null,
+)
+
+@Serializable
+data class FinancialReport(
+    val settlement: SettlementView,
+    val memberCommissions: List<SettlementLineView>,
+    val hostCosts: List<SettlementLineView>,
+    val expenses: List<SettlementLineView>,
+    val adjustments: List<AdjustmentView>,
 )
 
 @Serializable

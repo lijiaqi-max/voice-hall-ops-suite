@@ -52,4 +52,15 @@ class FinanceCalculatorTest {
         assertEquals(3_333, FinanceCalculator.prorate(10_000, 1_200_000, 3_600_000))
         assertEquals(5_000, FinanceCalculator.prorate(10_000, 1_800_000, 3_600_000))
     }
+
+    @Test
+    fun appliesAdjustmentsWithoutBreakingReconciliation() {
+        val receivable = FinanceCalculator.applyAdjustment(50_000, 20_000, 30_000, 500, "receivable")
+        assertEquals(Triple(50_500L, 20_000L, 30_500L), receivable)
+        assertEquals(0, receivable.first - receivable.second - receivable.third)
+
+        val payable = FinanceCalculator.applyAdjustment(50_000, 20_000, 30_000, 500, "payable")
+        assertEquals(Triple(50_000L, 20_500L, 29_500L), payable)
+        assertEquals(0, payable.first - payable.second - payable.third)
+    }
 }

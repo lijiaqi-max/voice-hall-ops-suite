@@ -1,5 +1,6 @@
 package com.local.voicehall.api
 
+import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -21,6 +22,8 @@ import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.receive
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondBytes
+import io.ktor.server.response.header
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
@@ -386,6 +389,10 @@ fun Application.module(
                 }
             }
             route("/revenue-imports") {
+                get {
+                    call.requirePermission("finance.read")
+                    call.respond(repository.listRevenueImports(call.identity()))
+                }
                 post("/preview") {
                     call.requirePermission("revenue.write")
                     call.respond(repository.previewRevenue(call.identity(), call.receive()))
@@ -396,6 +403,20 @@ fun Application.module(
                 }
             }
             route("/settlements") {
+                get {
+                    call.requirePermission("finance.read")
+                    call.respond(repository.listSettlements(call.identity()))
+                }
+                get("/rules") {
+                    call.requirePermission("finance.read")
+                    call.respond(repository.listSettlementRules(call.identity()))
+                }
+                get("/expenses") {
+                    call.requirePermission("finance.read")
+                    val end = call.request.queryParameters["end"]?.toLongOrNull() ?: System.currentTimeMillis()
+                    val start = call.request.queryParameters["start"]?.toLongOrNull() ?: end - 30L * 86_400_000
+                    call.respond(repository.listExpenses(call.identity(), start, end))
+                }
                 post("/rules") {
                     call.requirePermission("settlements.write")
                     call.respond(mapOf("id" to repository.createSettlementRule(call.identity(), call.receive())))
@@ -414,7 +435,7 @@ fun Application.module(
                 }
                 post("/{id}/adjustments") {
                     call.requirePermission("settlements.write")
-                    call.respond(mapOf("id" to repository.addAdjustment(call.identity(), call.requiredId(), call.receive())))
+                    call.respond(repository.addAdjustment(call.identity(), call.requiredId(), call.receive()))
                 }
             }
             get("/reports/summary") {
@@ -422,6 +443,24 @@ fun Application.module(
                 val end = call.request.queryParameters["end"]?.toLongOrNull() ?: System.currentTimeMillis()
                 val start = call.request.queryParameters["start"]?.toLongOrNull() ?: end - 30L * 86_400_000
                 call.respond(repository.reportSummary(call.identity(), start, end))
+            }
+            get("/reports/finance/{id}") {
+                call.requirePermission("finance.read")
+                call.respond(repository.financialReport(call.identity(), call.requiredId()))
+            }
+            get("/reports/export.xlsx") {
+                call.requirePermission("finance.read")
+                val settlementId = call.request.queryParameters["settlementId"]
+                    ?: error("缺少 settlementId")
+                val report = repository.financialReport(call.identity(), settlementId)
+                call.response.header(
+                    HttpHeaders.ContentDisposition,
+                    """attachment; filename="financial-report-$settlementId.xlsx"""",
+                )
+                call.respondBytes(
+                    FinanceWorkbook.generate(report),
+                    ContentType.parse("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+                )
             }
             route("/devices") {
                 get {

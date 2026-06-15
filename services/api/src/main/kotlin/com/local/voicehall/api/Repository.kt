@@ -1,5 +1,6 @@
 package com.local.voicehall.api
 
+import java.math.BigInteger
 import java.sql.Connection
 import java.sql.ResultSet
 import java.time.Instant
@@ -1057,32 +1058,122 @@ class OpsRepository(
             )
         }
 
+    fun listRevenueImports(identity: RequestIdentity): List<RevenueImportView> =
+        dataSource.connection { connection ->
+            val scoped = !hasGlobalRoomAccess(identity.role)
+            connection.prepareStatement(
+                """
+                SELECT i.id,i.file_name,i.file_sha256,i.expected_total_cents,
+                       i.calculated_total_cents,i.row_count,i.duplicate_count,i.state,
+                       i.created_at,i.committed_at
+                FROM revenue_imports i
+                WHERE i.organization_id=?
+                ${if (scoped) """
+                AND EXISTS (
+                    SELECT 1 FROM revenue_import_rows allowed
+                    WHERE allowed.import_id=i.id
+                      AND allowed.room_id IN (
+                          SELECT room_id FROM account_room_scopes WHERE account_id=?
+                      )
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM revenue_import_rows denied
+                    WHERE denied.import_id=i.id
+                      AND denied.room_id NOT IN (
+                          SELECT room_id FROM account_room_scopes WHERE account_id=?
+                      )
+                )
+                """.trimIndent() else ""}
+                ORDER BY i.created_at DESC
+                """.trimIndent(),
+            ).use {
+                it.setString(1, identity.organizationId)
+                if (scoped) {
+                    it.setString(2, identity.accountId)
+                    it.setString(3, identity.accountId)
+                }
+                it.executeQuery().use { rows ->
+                    rows.map {
+                        RevenueImportView(
+                            id = getString("id"),
+                            fileName = getString("file_name"),
+                            fileSha256 = getString("file_sha256"),
+                            expectedTotalCents = getLong("expected_total_cents"),
+                            calculatedTotalCents = getLong("calculated_total_cents"),
+                            rowCount = getInt("row_count"),
+                            duplicateCount = getInt("duplicate_count"),
+                            state = getString("state"),
+                            createdAtEpochMs = getLong("created_at"),
+                            committedAtEpochMs = getNullableLong("committed_at"),
+                        )
+                    }
+                }
+            }
+        }
+
     fun createSettlementRule(identity: RequestIdentity, input: SettlementRuleInput): String =
         dataSource.transaction { connection ->
             require(input.platformRateBps in 0..10_000)
             require(input.organizationShareBps in 0..10_000)
             require(input.memberCommissionBps in 0..10_000)
+            require(input.role in setOf("all", "member", "host"))
+            input.roomId?.let { requireRoomAccess(connection, identity, it) }
             val ruleId = id()
             connection.prepareStatement(
                 """
                 INSERT INTO settlement_rules(
-                    id,organization_id,name,effective_from,platform_rate_bps,
+                    id,organization_id,room_id,role,name,effective_from,platform_rate_bps,
                     organization_share_bps,member_commission_bps,active,created_at
-                ) VALUES (?,?,?,?,?,?,?,TRUE,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,TRUE,?)
                 """.trimIndent(),
             ).use {
                 it.setString(1, ruleId)
                 it.setString(2, identity.organizationId)
-                it.setString(3, input.name.trim())
-                it.setLong(4, input.effectiveFromEpochMs)
-                it.setInt(5, input.platformRateBps)
-                it.setInt(6, input.organizationShareBps)
-                it.setInt(7, input.memberCommissionBps)
-                it.setLong(8, now())
+                it.setNullableString(3, input.roomId)
+                it.setString(4, input.role)
+                it.setString(5, input.name.trim())
+                it.setLong(6, input.effectiveFromEpochMs)
+                it.setInt(7, input.platformRateBps)
+                it.setInt(8, input.organizationShareBps)
+                it.setInt(9, input.memberCommissionBps)
+                it.setLong(10, now())
                 it.executeUpdate()
             }
             audit(connection, identity, "settlement_rule.create", "settlement_rule", ruleId, "创建结算规则 ${input.name}")
             ruleId
+        }
+
+    fun listSettlementRules(identity: RequestIdentity): List<SettlementRuleView> =
+        dataSource.connection { connection ->
+            val scoped = !hasGlobalRoomAccess(identity.role)
+            connection.prepareStatement(
+                """
+                SELECT id,name,room_id,role,effective_from,platform_rate_bps,
+                       organization_share_bps,member_commission_bps,active
+                FROM settlement_rules
+                WHERE organization_id=?
+                ${if (scoped) "AND (room_id IS NULL OR room_id IN (SELECT room_id FROM account_room_scopes WHERE account_id=?))" else ""}
+                ORDER BY effective_from DESC,created_at DESC
+                """.trimIndent(),
+            ).use {
+                it.setString(1, identity.organizationId)
+                if (scoped) it.setString(2, identity.accountId)
+                it.executeQuery().use { rows ->
+                    rows.map {
+                        SettlementRuleView(
+                            id = getString("id"),
+                            name = getString("name"),
+                            roomId = getString("room_id"),
+                            role = getString("role"),
+                            effectiveFromEpochMs = getLong("effective_from"),
+                            platformRateBps = getInt("platform_rate_bps"),
+                            organizationShareBps = getInt("organization_share_bps"),
+                            memberCommissionBps = getInt("member_commission_bps"),
+                            active = getBoolean("active"),
+                        )
+                    }
+                }
+            }
         }
 
     fun addExpense(identity: RequestIdentity, input: ExpenseInput): String =
@@ -1110,73 +1201,54 @@ class OpsRepository(
             expenseId
         }
 
-    fun previewSettlement(identity: RequestIdentity, input: SettlementPreviewRequest): SettlementView =
+    fun listExpenses(identity: RequestIdentity, start: Long, end: Long): List<ExpenseView> =
         dataSource.connection { connection ->
-            require(input.periodEndEpochMs > input.periodStartEpochMs)
-            input.roomId?.let { requireRoomAccess(connection, identity, it) }
-            val rule = settlementRule(connection, identity.organizationId, input.ruleId, input.periodStartEpochMs)
-            val gross = sumLong(
-                connection,
+            require(end > start)
+            val scoped = !hasGlobalRoomAccess(identity.role)
+            connection.prepareStatement(
                 """
-                SELECT COALESCE(SUM(gross_cents),0) FROM revenue_lines
+                SELECT id,room_id,category,amount_cents,note,occurred_at
+                FROM expenses
                 WHERE organization_id=? AND occurred_at>=? AND occurred_at<?
-                ${if (input.roomId != null) "AND room_id=?" else ""}
-                """.trimIndent(),
-                identity.organizationId,
-                input.periodStartEpochMs,
-                input.periodEndEpochMs,
-                input.roomId,
-            )
-            val expenses = sumLong(
-                connection,
-                """
-                SELECT COALESCE(SUM(amount_cents),0) FROM expenses
-                WHERE organization_id=? AND occurred_at>=? AND occurred_at<?
-                ${if (input.roomId != null) "AND room_id=?" else ""}
-                """.trimIndent(),
-                identity.organizationId,
-                input.periodStartEpochMs,
-                input.periodEndEpochMs,
-                input.roomId,
-            )
-            val hostCost = connection.prepareStatement(
-                """
-                SELECT host_fixed_cents,host_hourly_cents,start_at,end_at FROM shifts
-                WHERE organization_id=? AND start_at<? AND end_at>?
-                ${if (input.roomId != null) "AND room_id=?" else ""}
-                AND status NOT IN ('cancelled')
+                ${if (scoped) "AND room_id IN (SELECT room_id FROM account_room_scopes WHERE account_id=?)" else ""}
+                ORDER BY occurred_at DESC,created_at DESC
                 """.trimIndent(),
             ).use {
                 it.setString(1, identity.organizationId)
-                it.setLong(2, input.periodEndEpochMs)
-                it.setLong(3, input.periodStartEpochMs)
-                if (input.roomId != null) it.setString(4, input.roomId)
+                it.setLong(2, start)
+                it.setLong(3, end)
+                if (scoped) it.setString(4, identity.accountId)
                 it.executeQuery().use { rows ->
-                    var total = 0L
-                    while (rows.next()) {
-                        val duration = (rows.getLong("end_at") - rows.getLong("start_at")).coerceAtLeast(0)
-                        total += rows.getLong("host_fixed_cents")
-                        total += FinanceCalculator.prorate(
-                            rows.getLong("host_hourly_cents"),
-                            duration,
-                            HOUR_MS,
+                    rows.map {
+                        ExpenseView(
+                            id = getString("id"),
+                            roomId = getString("room_id"),
+                            category = getString("category"),
+                            amountCents = getLong("amount_cents"),
+                            note = getString("note"),
+                            occurredAtEpochMs = getLong("occurred_at"),
                         )
                     }
-                    total
                 }
             }
-            FinanceCalculator.calculate(
-                FinanceInputs(gross, rule.platformRate, rule.organizationShare, rule.memberCommission, hostCost, expenses),
-                input.roomId,
-                input.periodStartEpochMs,
-                input.periodEndEpochMs,
-                rule.id,
-            )
+        }
+
+    fun previewSettlement(identity: RequestIdentity, input: SettlementPreviewRequest): SettlementView =
+        dataSource.connection { connection ->
+            calculateSettlementPreview(connection, identity, input)
         }
 
     fun closeSettlement(identity: RequestIdentity, input: SettlementPreviewRequest): SettlementView =
         dataSource.transaction { connection ->
-            val preview = previewSettlement(identity, input)
+            val preview = calculateSettlementPreview(connection, identity, input)
+            check(preview.unallocatedRevenueCents == 0L) {
+                "仍有 ${preview.unallocatedRevenueCents} 分流水未归属成员，禁止关账"
+            }
+            if (preview.hostCostEstimated) {
+                check(input.hostCostOverrideReason?.trim()?.length in 4..500) {
+                    "存在未核验主持麦时，关账必须填写 4-500 字人工确认原因"
+                }
+            }
             val overlap = connection.prepareStatement(
                 """
                 SELECT COUNT(*) FROM settlements WHERE organization_id=? AND state='closed'
@@ -1199,8 +1271,15 @@ class OpsRepository(
                     id,organization_id,room_id,period_start,period_end,rule_id,gross_cents,
                     platform_deduction_cents,organization_share_cents,member_commission_cents,
                     host_cost_cents,expense_cents,accounts_receivable_cents,accounts_payable_cents,
-                    net_profit_cents,state,closed_by,closed_at,created_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    net_profit_cents,base_accounts_receivable_cents,base_accounts_payable_cents,
+                    base_net_profit_cents,adjustment_cents,host_cost_estimated,
+                    host_cost_override_reason,unallocated_revenue_cents,
+                    reconciliation_difference_cents,state,closed_by,closed_at,created_at
+                ) VALUES (
+                    ?,?,?,?,?,?,?,?,?,
+                    ?,?,?,?,?,?,?,?,?,
+                    ?,?,?,?,?,?,?,?,?
+                )
                 """.trimIndent(),
             ).use {
                 var i = 1
@@ -1219,46 +1298,174 @@ class OpsRepository(
                 it.setLong(i++, preview.accountsReceivableCents)
                 it.setLong(i++, preview.accountsPayableCents)
                 it.setLong(i++, preview.netProfitCents)
+                it.setLong(i++, preview.accountsReceivableCents)
+                it.setLong(i++, preview.accountsPayableCents)
+                it.setLong(i++, preview.netProfitCents)
+                it.setLong(i++, 0)
+                it.setBoolean(i++, preview.hostCostEstimated)
+                it.setNullableString(i++, input.hostCostOverrideReason?.trim())
+                it.setLong(i++, preview.unallocatedRevenueCents)
+                it.setLong(i++, preview.reconciliationDifferenceCents)
                 it.setString(i++, "closed")
                 it.setString(i++, identity.accountId)
                 it.setLong(i++, now())
                 it.setLong(i, now())
                 it.executeUpdate()
             }
+            val settlementLines = settlementLines(connection, identity, input, preview)
+            settlementLines.forEach { line ->
+                insertSettlementLine(connection, identity.organizationId, settlementId, input.roomId, line)
+            }
             audit(connection, identity, "settlement.close", "settlement", settlementId, "关闭结算期")
-            preview.copy(id = settlementId, state = "closed")
+            preview.copy(
+                id = settlementId,
+                hostCostOverrideReason = input.hostCostOverrideReason?.trim(),
+                state = "closed",
+            )
         }
 
-    fun addAdjustment(identity: RequestIdentity, settlementId: String, input: AdjustmentInput): String =
+    fun addAdjustment(identity: RequestIdentity, settlementId: String, input: AdjustmentInput): AdjustmentView =
         dataSource.transaction { connection ->
             require(input.reason.trim().length in 2..500)
-            val exists = connection.prepareStatement(
-                "SELECT COUNT(*) FROM settlements WHERE id=? AND organization_id=? AND state='closed'",
+            require(input.amountCents != 0L) { "调整金额不能为 0" }
+            require(input.effect in setOf("net", "receivable", "payable", "expense")) {
+                "调整类型无效"
+            }
+            val current = connection.prepareStatement(
+                """
+                SELECT room_id,accounts_receivable_cents,accounts_payable_cents,
+                       net_profit_cents,adjustment_cents,expense_cents
+                FROM settlements
+                WHERE id=? AND organization_id=? AND state='closed'
+                FOR UPDATE
+                """.trimIndent(),
             ).use {
                 it.setString(1, settlementId)
                 it.setString(2, identity.organizationId)
-                it.executeQuery().use { rows -> rows.next(); rows.getInt(1) == 1 }
+                it.executeQuery().use { rows ->
+                    check(rows.next()) { "已关闭结算单不存在" }
+                    SettlementAdjustmentState(
+                        roomId = rows.getString("room_id"),
+                        receivableCents = rows.getLong("accounts_receivable_cents"),
+                        payableCents = rows.getLong("accounts_payable_cents"),
+                        netProfitCents = rows.getLong("net_profit_cents"),
+                        adjustmentCents = rows.getLong("adjustment_cents"),
+                        expenseCents = rows.getLong("expense_cents"),
+                    )
+                }
             }
-            check(exists) { "已关闭结算单不存在" }
+            current.roomId?.let { requireRoomAccess(connection, identity, it) }
+            if (current.roomId == null) {
+                check(hasGlobalRoomAccess(identity.role)) { "房间范围账号不能调整组织级结算" }
+            }
+            val normalizedEffect = if (input.effect == "net") "receivable" else input.effect
+            val adjusted = FinanceCalculator.applyAdjustment(
+                current.receivableCents,
+                current.payableCents,
+                current.netProfitCents,
+                input.amountCents,
+                normalizedEffect,
+            )
+            val deltaNet = adjusted.third - current.netProfitCents
+            val newExpenseCents = if (normalizedEffect == "expense") {
+                Math.addExact(current.expenseCents, input.amountCents)
+            } else {
+                current.expenseCents
+            }
+            check(adjusted.first >= 0 && adjusted.second >= 0 && newExpenseCents >= 0) {
+                "调整后应收、应付或支出不能为负数"
+            }
+            val reconciliation = adjusted.first - adjusted.second - adjusted.third
             val adjustmentId = id()
+            val createdAt = now()
             connection.prepareStatement(
                 """
                 INSERT INTO settlement_adjustments(
-                    id,settlement_id,organization_id,amount_cents,reason,created_by,created_at
-                ) VALUES (?,?,?,?,?,?,?)
+                    id,settlement_id,organization_id,amount_cents,effect,reason,created_by,created_at,
+                    before_receivable_cents,before_payable_cents,before_net_profit_cents,
+                    after_receivable_cents,after_payable_cents,after_net_profit_cents
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """.trimIndent(),
             ).use {
                 it.setString(1, adjustmentId)
                 it.setString(2, settlementId)
                 it.setString(3, identity.organizationId)
                 it.setLong(4, input.amountCents)
-                it.setString(5, input.reason.trim())
-                it.setString(6, identity.accountId)
-                it.setLong(7, now())
+                it.setString(5, normalizedEffect)
+                it.setString(6, input.reason.trim())
+                it.setString(7, identity.accountId)
+                it.setLong(8, createdAt)
+                it.setLong(9, current.receivableCents)
+                it.setLong(10, current.payableCents)
+                it.setLong(11, current.netProfitCents)
+                it.setLong(12, adjusted.first)
+                it.setLong(13, adjusted.second)
+                it.setLong(14, adjusted.third)
+                it.executeUpdate()
+            }
+            connection.prepareStatement(
+                """
+                UPDATE settlements
+                SET accounts_receivable_cents=?,accounts_payable_cents=?,net_profit_cents=?,
+                    expense_cents=?,adjustment_cents=?,reconciliation_difference_cents=?
+                WHERE id=? AND organization_id=?
+                """.trimIndent(),
+            ).use {
+                it.setLong(1, adjusted.first)
+                it.setLong(2, adjusted.second)
+                it.setLong(3, adjusted.third)
+                it.setLong(4, newExpenseCents)
+                it.setLong(5, Math.addExact(current.adjustmentCents, deltaNet))
+                it.setLong(6, reconciliation)
+                it.setString(7, settlementId)
+                it.setString(8, identity.organizationId)
                 it.executeUpdate()
             }
             audit(connection, identity, "settlement.adjust", "settlement", settlementId, "结算调整 ${input.amountCents} 分")
-            adjustmentId
+            AdjustmentView(
+                id = adjustmentId,
+                settlementId = settlementId,
+                amountCents = input.amountCents,
+                effect = normalizedEffect,
+                reason = input.reason.trim(),
+                beforeReceivableCents = current.receivableCents,
+                beforePayableCents = current.payableCents,
+                beforeNetProfitCents = current.netProfitCents,
+                afterReceivableCents = adjusted.first,
+                afterPayableCents = adjusted.second,
+                afterNetProfitCents = adjusted.third,
+                createdAtEpochMs = createdAt,
+            )
+        }
+
+    fun listSettlements(identity: RequestIdentity): List<SettlementView> =
+        dataSource.connection { connection ->
+            val scoped = !hasGlobalRoomAccess(identity.role)
+            connection.prepareStatement(
+                """
+                SELECT * FROM settlements
+                WHERE organization_id=?
+                ${if (scoped) "AND room_id IN (SELECT room_id FROM account_room_scopes WHERE account_id=?)" else ""}
+                ORDER BY period_end DESC,created_at DESC
+                """.trimIndent(),
+            ).use {
+                it.setString(1, identity.organizationId)
+                if (scoped) it.setString(2, identity.accountId)
+                it.executeQuery().use { rows -> rows.map { settlementView() } }
+            }
+        }
+
+    fun financialReport(identity: RequestIdentity, settlementId: String): FinancialReport =
+        dataSource.connection { connection ->
+            val settlement = settlementById(connection, identity, settlementId)
+            val lines = settlementLines(connection, identity.organizationId, settlementId)
+            FinancialReport(
+                settlement = settlement,
+                memberCommissions = lines.filter { it.lineType == "member_commission" },
+                hostCosts = lines.filter { it.lineType == "host_cost" },
+                expenses = lines.filter { it.lineType == "expense" },
+                adjustments = settlementAdjustments(connection, identity.organizationId, settlementId),
+            )
         }
 
     fun reportSummary(identity: RequestIdentity, start: Long, end: Long): ReportSummary =
@@ -1924,21 +2131,446 @@ class OpsRepository(
             }
         }
 
-    private fun settlementRule(connection: Connection, orgId: String, requested: String?, periodStart: Long): RuleRow {
+    private fun calculateSettlementPreview(
+        connection: Connection,
+        identity: RequestIdentity,
+        input: SettlementPreviewRequest,
+    ): SettlementView {
+        require(input.periodEndEpochMs > input.periodStartEpochMs)
+        if (input.roomId != null) {
+            requireRoomAccess(connection, identity, input.roomId)
+        } else {
+            check(hasGlobalRoomAccess(identity.role)) { "房间范围账号不能试算组织级结算" }
+        }
+        val rule = settlementRule(
+            connection,
+            identity.organizationId,
+            input.roomId,
+            input.ruleId,
+            input.periodStartEpochMs,
+        )
+        val gross = sumLong(
+            connection,
+            """
+            SELECT COALESCE(SUM(gross_cents),0) FROM revenue_lines
+            WHERE organization_id=? AND occurred_at>=? AND occurred_at<?
+            ${if (input.roomId != null) "AND room_id=?" else ""}
+            """.trimIndent(),
+            identity.organizationId,
+            input.periodStartEpochMs,
+            input.periodEndEpochMs,
+            input.roomId,
+        )
+        val expenses = sumLong(
+            connection,
+            """
+            SELECT COALESCE(SUM(amount_cents),0) FROM expenses
+            WHERE organization_id=? AND occurred_at>=? AND occurred_at<?
+            ${if (input.roomId != null) "AND room_id=?" else ""}
+            """.trimIndent(),
+            identity.organizationId,
+            input.periodStartEpochMs,
+            input.periodEndEpochMs,
+            input.roomId,
+        )
+        val hostLines = hostCostDrafts(connection, identity.organizationId, input)
+        val unallocated = unallocatedRevenue(connection, identity.organizationId, input)
+        return FinanceCalculator.calculate(
+            FinanceInputs(
+                grossCents = gross,
+                platformRateBps = rule.platformRate,
+                organizationShareBps = rule.organizationShare,
+                memberCommissionBps = rule.memberCommission,
+                hostCostCents = hostLines.sumOf(HostCostDraft::amountCents),
+                expenseCents = expenses,
+            ),
+            input.roomId,
+            input.periodStartEpochMs,
+            input.periodEndEpochMs,
+            rule.id,
+            hostCostEstimated = hostLines.any(HostCostDraft::estimated),
+            hostCostOverrideReason = input.hostCostOverrideReason?.trim(),
+            unallocatedRevenueCents = unallocated,
+        )
+    }
+
+    private fun hostCostDrafts(
+        connection: Connection,
+        organizationId: String,
+        input: SettlementPreviewRequest,
+    ): List<HostCostDraft> = connection.prepareStatement(
+        """
+        SELECT s.id,s.room_id,s.title,s.start_at,s.end_at,s.host_fixed_cents,s.host_hourly_cents,
+               COALESCE(SUM(CASE WHEN m.state='closed' AND m.role='host' THEN m.duration_seconds ELSE 0 END),0)
+                   verified_host_seconds
+        FROM shifts s
+        LEFT JOIN mic_segments m ON m.shift_id=s.id AND m.organization_id=s.organization_id
+        WHERE s.organization_id=? AND s.start_at<? AND s.end_at>?
+        ${if (input.roomId != null) "AND s.room_id=?" else ""}
+        AND s.status NOT IN ('cancelled')
+        GROUP BY s.id,s.room_id,s.title,s.start_at,s.end_at,s.host_fixed_cents,s.host_hourly_cents
+        ORDER BY s.start_at
+        """.trimIndent(),
+    ).use {
+        it.setString(1, organizationId)
+        it.setLong(2, input.periodEndEpochMs)
+        it.setLong(3, input.periodStartEpochMs)
+        if (input.roomId != null) it.setString(4, input.roomId)
+        it.executeQuery().use { rows ->
+            rows.map {
+                val fixed = getLong("host_fixed_cents")
+                val hourly = getLong("host_hourly_cents")
+                val verifiedSeconds = getLong("verified_host_seconds")
+                val overlapMs = (
+                    minOf(getLong("end_at"), input.periodEndEpochMs) -
+                        maxOf(getLong("start_at"), input.periodStartEpochMs)
+                    ).coerceAtLeast(0)
+                val estimated = verifiedSeconds == 0L && (fixed > 0 || hourly > 0)
+                val usedMs = if (estimated) overlapMs else Math.multiplyExact(verifiedSeconds, 1_000L)
+                HostCostDraft(
+                    shiftId = getString("id"),
+                    roomId = getString("room_id"),
+                    label = getString("title"),
+                    amountCents = Math.addExact(fixed, FinanceCalculator.prorate(hourly, usedMs, HOUR_MS)),
+                    estimated = estimated,
+                    usedSeconds = if (estimated) overlapMs / 1_000L else verifiedSeconds,
+                )
+            }
+        }
+    }
+
+    private fun unallocatedRevenue(
+        connection: Connection,
+        organizationId: String,
+        input: SettlementPreviewRequest,
+    ): Long = connection.prepareStatement(
+        """
+        SELECT room_id,customer_id,gross_cents FROM revenue_lines
+        WHERE organization_id=? AND occurred_at>=? AND occurred_at<?
+        ${if (input.roomId != null) "AND room_id=?" else ""}
+        """.trimIndent(),
+    ).use {
+        it.setString(1, organizationId)
+        it.setLong(2, input.periodStartEpochMs)
+        it.setLong(3, input.periodEndEpochMs)
+        if (input.roomId != null) it.setString(4, input.roomId)
+        it.executeQuery().use { rows ->
+            var total = 0L
+            while (rows.next()) {
+                val customerId = rows.getString("customer_id")
+                val assigned = customerId != null && assignedMember(
+                    connection,
+                    organizationId,
+                    rows.getString("room_id"),
+                    customerId,
+                ) != null
+                if (!assigned) total = Math.addExact(total, rows.getLong("gross_cents"))
+            }
+            total
+        }
+    }
+
+    private fun settlementLines(
+        connection: Connection,
+        identity: RequestIdentity,
+        input: SettlementPreviewRequest,
+        preview: SettlementView,
+    ): List<FinancialLineDraft> =
+        memberCommissionDrafts(connection, identity.organizationId, input, preview.memberCommissionCents) +
+            hostCostDrafts(connection, identity.organizationId, input).map {
+                FinancialLineDraft(
+                    lineType = "host_cost",
+                    referenceId = it.shiftId,
+                    accountId = null,
+                    label = it.label,
+                    grossCents = 0,
+                    amountCents = it.amountCents,
+                    verified = !it.estimated,
+                    note = if (it.estimated) {
+                        "缺少已核验主持麦时，按排班 ${it.usedSeconds} 秒预估"
+                    } else {
+                        "按已核验主持麦时 ${it.usedSeconds} 秒"
+                    },
+                )
+            } + expenseDrafts(connection, identity.organizationId, input)
+
+    private fun memberCommissionDrafts(
+        connection: Connection,
+        organizationId: String,
+        input: SettlementPreviewRequest,
+        totalCommissionCents: Long,
+    ): List<FinancialLineDraft> {
+        val grouped = linkedMapOf<AssignedMember, Long>()
+        connection.prepareStatement(
+            """
+            SELECT room_id,customer_id,gross_cents FROM revenue_lines
+            WHERE organization_id=? AND occurred_at>=? AND occurred_at<?
+            ${if (input.roomId != null) "AND room_id=?" else ""}
+            ORDER BY occurred_at,id
+            """.trimIndent(),
+        ).use {
+            it.setString(1, organizationId)
+            it.setLong(2, input.periodStartEpochMs)
+            it.setLong(3, input.periodEndEpochMs)
+            if (input.roomId != null) it.setString(4, input.roomId)
+            it.executeQuery().use { rows ->
+                while (rows.next()) {
+                    val customerId = rows.getString("customer_id") ?: continue
+                    val member = assignedMember(connection, organizationId, rows.getString("room_id"), customerId)
+                        ?: continue
+                    grouped[member] = Math.addExact(grouped[member] ?: 0L, rows.getLong("gross_cents"))
+                }
+            }
+        }
+        val entries = grouped.entries.toList()
+        val allocated = allocateProportion(totalCommissionCents, entries.map { it.value })
+        return entries.mapIndexed { index, entry ->
+            FinancialLineDraft(
+                lineType = "member_commission",
+                referenceId = null,
+                accountId = entry.key.accountId,
+                label = entry.key.displayName,
+                grossCents = entry.value,
+                amountCents = allocated[index],
+                verified = true,
+                note = "按结算规则分配",
+            )
+        }
+    }
+
+    private fun expenseDrafts(
+        connection: Connection,
+        organizationId: String,
+        input: SettlementPreviewRequest,
+    ): List<FinancialLineDraft> = connection.prepareStatement(
+        """
+        SELECT id,category,amount_cents,note FROM expenses
+        WHERE organization_id=? AND occurred_at>=? AND occurred_at<?
+        ${if (input.roomId != null) "AND room_id=?" else ""}
+        ORDER BY occurred_at,id
+        """.trimIndent(),
+    ).use {
+        it.setString(1, organizationId)
+        it.setLong(2, input.periodStartEpochMs)
+        it.setLong(3, input.periodEndEpochMs)
+        if (input.roomId != null) it.setString(4, input.roomId)
+        it.executeQuery().use { rows ->
+            rows.map {
+                FinancialLineDraft(
+                    lineType = "expense",
+                    referenceId = getString("id"),
+                    accountId = null,
+                    label = getString("category"),
+                    grossCents = 0,
+                    amountCents = getLong("amount_cents"),
+                    verified = true,
+                    note = getString("note"),
+                )
+            }
+        }
+    }
+
+    private fun assignedMember(
+        connection: Connection,
+        organizationId: String,
+        roomId: String,
+        customerId: String,
+    ): AssignedMember? = connection.prepareStatement(
+        """
+        SELECT t.assigned_account_id,a.display_name
+        FROM tasks t JOIN accounts a ON a.id=t.assigned_account_id
+        WHERE t.organization_id=? AND t.room_id=? AND t.customer_id=?
+          AND t.assigned_account_id IS NOT NULL
+          AND t.state NOT IN ('rejected','cancelled')
+        ORDER BY t.updated_at DESC LIMIT 1
+        """.trimIndent(),
+    ).use {
+        it.setString(1, organizationId)
+        it.setString(2, roomId)
+        it.setString(3, customerId)
+        it.executeQuery().use { rows ->
+            if (rows.next()) AssignedMember(rows.getString(1), rows.getString(2)) else null
+        }
+    }
+
+    private fun allocateProportion(totalCents: Long, weights: List<Long>): List<Long> {
+        if (weights.isEmpty()) return emptyList()
+        val totalWeight = weights.fold(BigInteger.ZERO) { total, value ->
+            require(value >= 0)
+            total + BigInteger.valueOf(value)
+        }
+        if (totalWeight == BigInteger.ZERO) return List(weights.size) { 0L }
+        val total = BigInteger.valueOf(totalCents)
+        val allocations = MutableList(weights.size) { BigInteger.ZERO }
+        val remainders = mutableListOf<Pair<Int, BigInteger>>()
+        weights.forEachIndexed { index, weight ->
+            val parts = total.multiply(BigInteger.valueOf(weight)).divideAndRemainder(totalWeight)
+            allocations[index] = parts[0]
+            remainders += index to parts[1]
+        }
+        var remaining = total - allocations.fold(BigInteger.ZERO, BigInteger::add)
+        remainders.sortedByDescending { it.second }.forEach { (index, _) ->
+            if (remaining > BigInteger.ZERO) {
+                allocations[index] += BigInteger.ONE
+                remaining -= BigInteger.ONE
+            }
+        }
+        return allocations.map(BigInteger::longValueExact)
+    }
+
+    private fun insertSettlementLine(
+        connection: Connection,
+        organizationId: String,
+        settlementId: String,
+        roomId: String?,
+        line: FinancialLineDraft,
+    ) {
+        connection.prepareStatement(
+            """
+            INSERT INTO settlement_lines(
+                id,settlement_id,organization_id,room_id,line_type,reference_id,account_id,
+                label,gross_cents,amount_cents,verified,note,created_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """.trimIndent(),
+        ).use {
+            it.setString(1, id())
+            it.setString(2, settlementId)
+            it.setString(3, organizationId)
+            it.setNullableString(4, roomId)
+            it.setString(5, line.lineType)
+            it.setNullableString(6, line.referenceId)
+            it.setNullableString(7, line.accountId)
+            it.setString(8, line.label)
+            it.setLong(9, line.grossCents)
+            it.setLong(10, line.amountCents)
+            it.setBoolean(11, line.verified)
+            it.setNullableString(12, line.note)
+            it.setLong(13, now())
+            it.executeUpdate()
+        }
+    }
+
+    private fun settlementById(
+        connection: Connection,
+        identity: RequestIdentity,
+        settlementId: String,
+    ): SettlementView = connection.prepareStatement(
+        "SELECT * FROM settlements WHERE id=? AND organization_id=?",
+    ).use {
+        it.setString(1, settlementId)
+        it.setString(2, identity.organizationId)
+        it.executeQuery().use { rows ->
+            check(rows.next()) { "结算单不存在" }
+            rows.getString("room_id")?.let { roomId -> requireRoomAccess(connection, identity, roomId) }
+                ?: check(hasGlobalRoomAccess(identity.role)) { "房间范围账号不能读取组织级结算" }
+            rows.settlementView()
+        }
+    }
+
+    private fun settlementLines(
+        connection: Connection,
+        organizationId: String,
+        settlementId: String,
+    ): List<SettlementLineView> = connection.prepareStatement(
+        """
+        SELECT id,line_type,reference_id,account_id,label,gross_cents,amount_cents,verified,note
+        FROM settlement_lines WHERE organization_id=? AND settlement_id=?
+        ORDER BY line_type,label,id
+        """.trimIndent(),
+    ).use {
+        it.setString(1, organizationId)
+        it.setString(2, settlementId)
+        it.executeQuery().use { rows ->
+            rows.map {
+                SettlementLineView(
+                    id = getString("id"),
+                    lineType = getString("line_type"),
+                    referenceId = getString("reference_id"),
+                    accountId = getString("account_id"),
+                    label = getString("label"),
+                    grossCents = getLong("gross_cents"),
+                    amountCents = getLong("amount_cents"),
+                    verified = getBoolean("verified"),
+                    note = getString("note"),
+                )
+            }
+        }
+    }
+
+    private fun settlementAdjustments(
+        connection: Connection,
+        organizationId: String,
+        settlementId: String,
+    ): List<AdjustmentView> = connection.prepareStatement(
+        """
+        SELECT id,amount_cents,effect,reason,before_receivable_cents,before_payable_cents,
+               before_net_profit_cents,after_receivable_cents,after_payable_cents,
+               after_net_profit_cents,created_at
+        FROM settlement_adjustments
+        WHERE organization_id=? AND settlement_id=?
+        ORDER BY created_at,id
+        """.trimIndent(),
+    ).use {
+        it.setString(1, organizationId)
+        it.setString(2, settlementId)
+        it.executeQuery().use { rows ->
+            rows.map {
+                AdjustmentView(
+                    id = getString("id"),
+                    settlementId = settlementId,
+                    amountCents = getLong("amount_cents"),
+                    effect = getString("effect"),
+                    reason = getString("reason"),
+                    beforeReceivableCents = getLong("before_receivable_cents"),
+                    beforePayableCents = getLong("before_payable_cents"),
+                    beforeNetProfitCents = getLong("before_net_profit_cents"),
+                    afterReceivableCents = getLong("after_receivable_cents"),
+                    afterPayableCents = getLong("after_payable_cents"),
+                    afterNetProfitCents = getLong("after_net_profit_cents"),
+                    createdAtEpochMs = getLong("created_at"),
+                )
+            }
+        }
+    }
+
+    private fun settlementRule(
+        connection: Connection,
+        orgId: String,
+        roomId: String?,
+        requested: String?,
+        periodStart: Long,
+    ): RuleRow {
+        val roomCondition = if (roomId == null) "room_id IS NULL" else "(room_id=? OR room_id IS NULL)"
         val sql = if (requested != null) {
-            "SELECT id,platform_rate_bps,organization_share_bps,member_commission_bps FROM settlement_rules WHERE id=? AND organization_id=?"
+            """
+            SELECT id,platform_rate_bps,organization_share_bps,member_commission_bps
+            FROM settlement_rules
+            WHERE id=? AND organization_id=? AND active=TRUE AND effective_from<=?
+              AND role IN ('all','member') AND $roomCondition
+            """.trimIndent()
         } else {
             """
             SELECT id,platform_rate_bps,organization_share_bps,member_commission_bps
-            FROM settlement_rules WHERE organization_id=? AND active=TRUE AND effective_from<=?
-            ORDER BY effective_from DESC LIMIT 1
+            FROM settlement_rules
+            WHERE organization_id=? AND active=TRUE AND effective_from<=?
+              AND role IN ('all','member') AND $roomCondition
+            ORDER BY ${if (roomId == null) "effective_from" else "CASE WHEN room_id=? THEN 0 ELSE 1 END,effective_from"} DESC
+            LIMIT 1
             """.trimIndent()
         }
         return connection.prepareStatement(sql).use {
             if (requested != null) {
-                it.setString(1, requested); it.setString(2, orgId)
+                it.setString(1, requested)
+                it.setString(2, orgId)
+                it.setLong(3, periodStart)
+                if (roomId != null) it.setString(4, roomId)
             } else {
-                it.setString(1, orgId); it.setLong(2, periodStart)
+                it.setString(1, orgId)
+                it.setLong(2, periodStart)
+                if (roomId != null) {
+                    it.setString(3, roomId)
+                    it.setString(4, roomId)
+                }
             }
             it.executeQuery().use { rows ->
                 check(rows.next()) { "没有适用的结算规则" }
@@ -2128,6 +2760,40 @@ private data class RuleRow(
     val memberCommission: Int,
 )
 
+private data class AssignedMember(
+    val accountId: String,
+    val displayName: String,
+)
+
+private data class HostCostDraft(
+    val shiftId: String,
+    val roomId: String,
+    val label: String,
+    val amountCents: Long,
+    val estimated: Boolean,
+    val usedSeconds: Long,
+)
+
+private data class FinancialLineDraft(
+    val lineType: String,
+    val referenceId: String?,
+    val accountId: String?,
+    val label: String,
+    val grossCents: Long,
+    val amountCents: Long,
+    val verified: Boolean,
+    val note: String?,
+)
+
+private data class SettlementAdjustmentState(
+    val roomId: String?,
+    val receivableCents: Long,
+    val payableCents: Long,
+    val netProfitCents: Long,
+    val adjustmentCents: Long,
+    val expenseCents: Long,
+)
+
 private data class DeviceRow(
     val organizationId: String,
     val roomId: String,
@@ -2173,6 +2839,32 @@ private fun ResultSet.shiftView() = ShiftView(
     getLong("host_fixed_cents"),
     getLong("host_hourly_cents"),
     getNullableLong("checked_in_at"),
+)
+
+private fun ResultSet.settlementView() = SettlementView(
+    id = getString("id"),
+    roomId = getString("room_id"),
+    periodStartEpochMs = getLong("period_start"),
+    periodEndEpochMs = getLong("period_end"),
+    ruleId = getString("rule_id"),
+    grossCents = getLong("gross_cents"),
+    platformDeductionCents = getLong("platform_deduction_cents"),
+    organizationShareCents = getLong("organization_share_cents"),
+    memberCommissionCents = getLong("member_commission_cents"),
+    hostCostCents = getLong("host_cost_cents"),
+    expenseCents = getLong("expense_cents"),
+    accountsReceivableCents = getLong("accounts_receivable_cents"),
+    accountsPayableCents = getLong("accounts_payable_cents"),
+    netProfitCents = getLong("net_profit_cents"),
+    baseAccountsReceivableCents = getLong("base_accounts_receivable_cents"),
+    baseAccountsPayableCents = getLong("base_accounts_payable_cents"),
+    baseNetProfitCents = getLong("base_net_profit_cents"),
+    adjustmentCents = getLong("adjustment_cents"),
+    hostCostEstimated = getBoolean("host_cost_estimated"),
+    hostCostOverrideReason = getString("host_cost_override_reason"),
+    unallocatedRevenueCents = getLong("unallocated_revenue_cents"),
+    reconciliationDifferenceCents = getLong("reconciliation_difference_cents"),
+    state = getString("state"),
 )
 
 private inline fun <T> ResultSet.map(block: ResultSet.() -> T): List<T> {
