@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Voice Hall Legacy Backup Manifest",
+  "type": "object",
+  "required": ["formatVersion", "source", "exportedAtEpochMs", "files"],
+  "properties": {
+    "formatVersion": { "type": "integer", "minimum": 1 },
+    "source": { "enum": ["interaction-assistant", "mic-queue-assistant"] },
+    "exportedAtEpochMs": { "type": "integer" },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": { "type": "string" },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    }
+  }
+}
+

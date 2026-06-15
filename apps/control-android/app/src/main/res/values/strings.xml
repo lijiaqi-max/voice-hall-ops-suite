@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">语音厅厅控端</string>
+    <string name="accessibility_service_name">语音厅厅控采集服务</string>
+    <string name="accessibility_description">根据已选择的设备角色读取映客语音房或指定微信群当前可见页面；真实自动化在完成真机校准前保持关闭。</string>
+    <string name="transport_channel">私有云事件同步</string>
+    <string name="transport_running">语音厅厅控端正在同步本地事件队列</string>
+</resources>

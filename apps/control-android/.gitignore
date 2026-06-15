@@ -1,0 +1,12 @@
+.gradle/
+.kotlin/
+node_modules/
+**/build/
+local.properties
+keystore.properties
+*.jks
+*.keystore
+artifacts/android/*.apk
+artifacts/android/*.json
+artifacts/android/*.txt
+artifacts/xlsx-previews/

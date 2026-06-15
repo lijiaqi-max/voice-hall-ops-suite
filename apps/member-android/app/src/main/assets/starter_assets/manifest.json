@@ -1,0 +1,77 @@
+{
+  "format_version": 1,
+  "assets": [
+    {
+      "filename": "thanks.png",
+      "title": "感谢陪伴",
+      "subtitle": "今天的互动我记住啦",
+      "dimensions": [
+        1080,
+        1080
+      ],
+      "sha256": "4e9ebc3a0860250a202da6480a67e9b24593347c49b790327cdbddb7fa97bf63",
+      "source_background": "01-thanks-background.png",
+      "provenance": "OpenAI ImageGen background; deterministic Microsoft YaHei typography"
+    },
+    {
+      "filename": "welcome-back.png",
+      "title": "欢迎回来",
+      "subtitle": "见到熟悉的你真好",
+      "dimensions": [
+        1080,
+        1080
+      ],
+      "sha256": "bf55acdc0a1cc7bd3dd64f20c24391aa4421ad8a388fe982f8c92b885d42d1cc",
+      "source_background": "02-welcome-back-background.png",
+      "provenance": "OpenAI ImageGen background; deterministic Microsoft YaHei typography"
+    },
+    {
+      "filename": "tonight.png",
+      "title": "今晚见",
+      "subtitle": "有空就来坐坐",
+      "dimensions": [
+        1080,
+        1080
+      ],
+      "sha256": "fa46c25b81f0898695a857bb7661e392442cf6910cdb073ce0f0b54ae22da678",
+      "source_background": "03-tonight-background.png",
+      "provenance": "OpenAI ImageGen background; deterministic Microsoft YaHei typography"
+    },
+    {
+      "filename": "daily-greeting.png",
+      "title": "日常问候",
+      "subtitle": "忙完也要好好休息",
+      "dimensions": [
+        1080,
+        1080
+      ],
+      "sha256": "a725085fe399f6b7438eff218d370a7e499293f3bc1d903d2d365f10dedc7e91",
+      "source_background": "04-daily-greeting-background.png",
+      "provenance": "OpenAI ImageGen background; deterministic Microsoft YaHei typography"
+    },
+    {
+      "filename": "seasonal-blessing.png",
+      "title": "节日祝福",
+      "subtitle": "愿你顺心，常有好心情",
+      "dimensions": [
+        1080,
+        1080
+      ],
+      "sha256": "89b1bec51e9426224ca83391619aa64dbda0184e3765661630d542e296993c93",
+      "source_background": "05-seasonal-background.png",
+      "provenance": "OpenAI ImageGen background; deterministic Microsoft YaHei typography"
+    },
+    {
+      "filename": "next-time.png",
+      "title": "下次直播见",
+      "subtitle": "感谢今天的陪伴",
+      "dimensions": [
+        1080,
+        1080
+      ],
+      "sha256": "d5c4418e7323c13d01fa672b5efde782596041aaf19707fa4afaab8a968d12de",
+      "source_background": "06-next-time-background.png",
+      "provenance": "OpenAI ImageGen background; deterministic Microsoft YaHei typography"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">语音厅成员端</string>
+    <string name="approval_countdown">批准剩余 %1$d 秒，倒计时结束将停止发送</string>
+</resources>
