@@ -7,6 +7,8 @@ import io.ktor.server.auth.jwt.JWTPrincipal
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64
 import java.util.Date
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -23,11 +25,11 @@ object Roles {
 
     private val permissions = mapOf(
         OWNER to setOf("*"),
-        ADMIN to setOf("rooms.write", "shifts.write", "customers.write", "tasks.write", "tasks.review", "revenue.write", "settlements.write", "reports.read", "audit.read", "devices.write", "amounts.exact"),
-        SCHEDULER to setOf("rooms.read", "shifts.write", "customers.read", "tasks.write", "reports.read"),
-        FINANCE to setOf("rooms.read", "customers.read", "revenue.write", "settlements.write", "reports.read", "audit.read", "amounts.exact"),
-        MEMBER to setOf("rooms.read", "tasks.claim", "tasks.execute", "customers.read"),
-        AUDITOR to setOf("rooms.read", "customers.read", "reports.read", "audit.read", "amounts.exact"),
+        ADMIN to setOf("rooms.write", "shifts.write", "customers.write", "tasks.read", "tasks.write", "tasks.review", "mic.read", "revenue.write", "finance.read", "settlements.write", "reports.read", "audit.read", "devices.write", "amounts.exact"),
+        SCHEDULER to setOf("rooms.read", "shifts.write", "customers.read", "tasks.read", "tasks.write", "mic.read", "reports.read"),
+        FINANCE to setOf("rooms.read", "customers.read", "tasks.read", "revenue.write", "finance.read", "settlements.write", "reports.read", "audit.read", "amounts.exact"),
+        MEMBER to setOf("rooms.read", "tasks.read", "tasks.claim", "tasks.execute", "customers.read"),
+        AUDITOR to setOf("rooms.read", "customers.read", "tasks.read", "mic.read", "finance.read", "reports.read", "audit.read", "amounts.exact"),
         DEVICE to setOf("device.events.write"),
     )
 
@@ -128,6 +130,7 @@ class JwtService(
             .withClaim("org", account.organizationId)
             .withClaim("role", account.role)
             .withClaim("name", account.displayName)
+            .withClaim("ver", account.tokenVersion)
             .withIssuedAt(Date(now))
             .withExpiresAt(Date(now + ttlSeconds * 1_000))
             .sign(algorithm)
@@ -141,6 +144,7 @@ data class RequestIdentity(
     val organizationId: String,
     val role: String,
     val displayName: String,
+    val tokenVersion: Int,
 )
 
 fun JWTPrincipal.identity(): RequestIdentity = RequestIdentity(
@@ -148,4 +152,15 @@ fun JWTPrincipal.identity(): RequestIdentity = RequestIdentity(
     organizationId = payload.getClaim("org").asString(),
     role = payload.getClaim("role").asString(),
     displayName = payload.getClaim("name").asString(),
+    tokenVersion = payload.getClaim("ver").asInt() ?: 0,
 )
+
+object SecureTokens {
+    private val random = SecureRandom()
+
+    fun create(bytes: Int = 48): String {
+        val value = ByteArray(bytes)
+        random.nextBytes(value)
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(value)
+    }
+}

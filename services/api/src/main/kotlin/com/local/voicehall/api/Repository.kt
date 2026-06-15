@@ -6,7 +6,6 @@ import java.time.Instant
 import java.time.ZoneId
 import java.util.UUID
 import javax.sql.DataSource
-import kotlin.math.roundToLong
 
 class OpsRepository(
     private val dataSource: DataSource,
@@ -89,12 +88,191 @@ class OpsRepository(
     fun findAccount(username: String): AuthAccount? = dataSource.connection { connection ->
         connection.prepareStatement(
             """
-            SELECT id,organization_id,username,display_name,role,password_hash,enabled,totp_secret
+            SELECT id,organization_id,username,display_name,role,password_hash,enabled,totp_secret,token_version
             FROM accounts WHERE username = ?
             """.trimIndent(),
         ).use {
             it.setString(1, username.trim())
             it.executeQuery().use { rows -> if (rows.next()) rows.authAccount() else null }
+        }
+    }
+
+    fun isAccessTokenValid(
+        accountId: String,
+        organizationId: String,
+        tokenVersion: Int,
+    ): Boolean = dataSource.connection { connection ->
+        connection.prepareStatement(
+            """
+            SELECT COUNT(*) FROM accounts
+            WHERE id=? AND organization_id=? AND enabled=TRUE AND token_version=?
+            """.trimIndent(),
+        ).use {
+            it.setString(1, accountId)
+            it.setString(2, organizationId)
+            it.setInt(3, tokenVersion)
+            it.executeQuery().use { rows -> rows.next(); rows.getInt(1) == 1 }
+        }
+    }
+
+    fun isLoginAllowed(username: String): Boolean = dataSource.connection { connection ->
+        connection.prepareStatement(
+            "SELECT blocked_until FROM auth_login_attempts WHERE login_key=?",
+        ).use {
+            it.setString(1, loginKey(username))
+            it.executeQuery().use { rows ->
+                !rows.next() || rows.getNullableLong("blocked_until")?.let { blocked -> blocked <= now() } != false
+            }
+        }
+    }
+
+    fun recordLoginFailure(username: String) {
+        dataSource.transaction { connection ->
+            val key = loginKey(username)
+            val current = connection.prepareStatement(
+                """
+                SELECT failure_count,window_started_at FROM auth_login_attempts
+                WHERE login_key=? FOR UPDATE
+                """.trimIndent(),
+            ).use {
+                it.setString(1, key)
+                it.executeQuery().use { rows ->
+                    if (rows.next()) rows.getInt(1) to rows.getLong(2) else null
+                }
+            }
+            val currentTime = now()
+            val activeWindow = current?.takeIf { currentTime - it.second < LOGIN_WINDOW_MS }
+            val failures = activeWindow?.first?.plus(1) ?: 1
+            val windowStartedAt = activeWindow?.second ?: currentTime
+            val blockedUntil = if (failures >= LOGIN_MAX_FAILURES) currentTime + LOGIN_BLOCK_MS else null
+            if (current == null) {
+                connection.prepareStatement(
+                    """
+                    INSERT INTO auth_login_attempts(login_key,failure_count,window_started_at,blocked_until)
+                    VALUES (?,?,?,?)
+                    """.trimIndent(),
+                ).use {
+                    it.setString(1, key)
+                    it.setInt(2, failures)
+                    it.setLong(3, windowStartedAt)
+                    it.setNullableLong(4, blockedUntil)
+                    it.executeUpdate()
+                }
+            } else {
+                connection.prepareStatement(
+                    """
+                    UPDATE auth_login_attempts
+                    SET failure_count=?,window_started_at=?,blocked_until=?
+                    WHERE login_key=?
+                    """.trimIndent(),
+                ).use {
+                    it.setInt(1, failures)
+                    it.setLong(2, windowStartedAt)
+                    it.setNullableLong(3, blockedUntil)
+                    it.setString(4, key)
+                    it.executeUpdate()
+                }
+            }
+        }
+    }
+
+    fun clearLoginFailures(username: String) {
+        dataSource.connection { connection ->
+            connection.prepareStatement("DELETE FROM auth_login_attempts WHERE login_key=?").use {
+                it.setString(1, loginKey(username))
+                it.executeUpdate()
+            }
+        }
+    }
+
+    fun issueRefreshToken(account: AuthAccount): RefreshGrant =
+        dataSource.transaction { connection -> createRefreshGrant(connection, account) }
+
+    fun rotateRefreshToken(refreshToken: String): RefreshGrant =
+        dataSource.transaction { connection ->
+            require(refreshToken.length in 32..256) { "Invalid refresh token" }
+            val account = connection.prepareStatement(
+                """
+                SELECT a.id,a.organization_id,a.username,a.display_name,a.role,a.password_hash,
+                       a.enabled,a.totp_secret,a.token_version,t.id token_id,t.expires_at,t.revoked_at
+                FROM refresh_tokens t JOIN accounts a ON a.id=t.account_id
+                WHERE t.token_hash=? FOR UPDATE
+                """.trimIndent(),
+            ).use {
+                it.setString(1, sha256(refreshToken))
+                it.executeQuery().use { rows ->
+                    check(rows.next()) { "Refresh token is invalid" }
+                    check(rows.getNullableLong("revoked_at") == null) { "Refresh token was revoked" }
+                    check(rows.getLong("expires_at") > now()) { "Refresh token expired" }
+                    check(rows.getBoolean("enabled")) { "Account is disabled" }
+                    rows.authAccount() to rows.getString("token_id")
+                }
+            }
+            connection.prepareStatement("UPDATE refresh_tokens SET revoked_at=? WHERE id=?").use {
+                it.setLong(1, now())
+                it.setString(2, account.second)
+                it.executeUpdate()
+            }
+            createRefreshGrant(connection, account.first)
+        }
+
+    fun revokeRefreshToken(refreshToken: String) {
+        if (refreshToken.isBlank()) return
+        dataSource.connection { connection ->
+            connection.prepareStatement(
+                "UPDATE refresh_tokens SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL",
+            ).use {
+                it.setLong(1, now())
+                it.setString(2, sha256(refreshToken))
+                it.executeUpdate()
+            }
+        }
+    }
+
+    fun changePassword(
+        identity: RequestIdentity,
+        currentPassword: String,
+        newPassword: String,
+    ) {
+        require(newPassword.length >= 10) { "New password must contain at least 10 characters" }
+        require(newPassword != currentPassword) { "New password must be different" }
+        dataSource.transaction { connection ->
+            val passwordHash = connection.prepareStatement(
+                """
+                SELECT password_hash FROM accounts
+                WHERE id=? AND organization_id=? AND enabled=TRUE FOR UPDATE
+                """.trimIndent(),
+            ).use {
+                it.setString(1, identity.accountId)
+                it.setString(2, identity.organizationId)
+                it.executeQuery().use { rows ->
+                    check(rows.next()) { "Account does not exist" }
+                    rows.getString(1)
+                }
+            }
+            check(Passwords.verify(passwordHash, currentPassword.toCharArray())) {
+                "Current password is incorrect"
+            }
+            connection.prepareStatement(
+                """
+                UPDATE accounts
+                SET password_hash=?,token_version=token_version+1
+                WHERE id=? AND organization_id=?
+                """.trimIndent(),
+            ).use {
+                it.setString(1, Passwords.hash(newPassword.toCharArray()))
+                it.setString(2, identity.accountId)
+                it.setString(3, identity.organizationId)
+                it.executeUpdate()
+            }
+            connection.prepareStatement(
+                "UPDATE refresh_tokens SET revoked_at=? WHERE account_id=? AND revoked_at IS NULL",
+            ).use {
+                it.setLong(1, now())
+                it.setString(2, identity.accountId)
+                it.executeUpdate()
+            }
+            audit(connection, identity, "auth.password.change", "account", identity.accountId, "Password changed")
         }
     }
 
@@ -211,11 +389,17 @@ class OpsRepository(
             val sql = buildString {
                 append("SELECT id,room_id,host_account_id,title,start_at,end_at,status,host_fixed_cents,host_hourly_cents,checked_in_at FROM shifts WHERE organization_id=?")
                 if (roomId != null) append(" AND room_id=?")
+                if (roomId == null && !hasGlobalRoomAccess(identity.role)) {
+                    append(" AND room_id IN (SELECT room_id FROM account_room_scopes WHERE account_id=?)")
+                }
                 append(" ORDER BY start_at DESC")
             }
             connection.prepareStatement(sql).use {
                 it.setString(1, identity.organizationId)
                 if (roomId != null) it.setString(2, roomId)
+                if (roomId == null && !hasGlobalRoomAccess(identity.role)) {
+                    it.setString(2, identity.accountId)
+                }
                 it.executeQuery().use { rows -> rows.map { shiftView() } }
             }
         }
@@ -278,6 +462,25 @@ class OpsRepository(
 
     fun listCustomers(identity: RequestIdentity): List<CustomerView> = dataSource.connection { connection ->
         val now = now()
+        val roomScope = if (hasGlobalRoomAccess(identity.role)) "" else """
+            AND (
+                EXISTS (
+                    SELECT 1 FROM interaction_events i
+                    JOIN account_room_scopes s ON s.room_id=i.room_id
+                    WHERE i.customer_id=c.id AND s.account_id=?
+                )
+                OR EXISTS (
+                    SELECT 1 FROM revenue_lines scoped_revenue
+                    JOIN account_room_scopes s ON s.room_id=scoped_revenue.room_id
+                    WHERE scoped_revenue.customer_id=c.id AND s.account_id=?
+                )
+                OR EXISTS (
+                    SELECT 1 FROM tasks scoped_task
+                    JOIN account_room_scopes s ON s.room_id=scoped_task.room_id
+                    WHERE scoped_task.customer_id=c.id AND s.account_id=?
+                )
+            )
+        """.trimIndent()
         connection.prepareStatement(
             """
             SELECT c.id,c.display_name,c.relationship_stage,c.contact_eligibility,c.last_interaction_at,
@@ -290,6 +493,7 @@ class OpsRepository(
             JOIN customer_platform_accounts p ON p.customer_id=c.id
             LEFT JOIN revenue_lines r ON r.customer_id=c.id
             WHERE c.organization_id=?
+            $roomScope
             GROUP BY c.id,c.display_name,c.relationship_stage,c.contact_eligibility,c.last_interaction_at,p.platform,p.external_user_id
             ORDER BY revenue30 DESC,c.updated_at DESC
             """.trimIndent(),
@@ -298,6 +502,11 @@ class OpsRepository(
             it.setLong(2, now - 30L * DAY_MS)
             it.setLong(3, now - 90L * DAY_MS)
             it.setString(4, identity.organizationId)
+            if (!hasGlobalRoomAccess(identity.role)) {
+                it.setString(5, identity.accountId)
+                it.setString(6, identity.accountId)
+                it.setString(7, identity.accountId)
+            }
             it.executeQuery().use { rows ->
                 rows.map {
                     val revenue30 = getLong("revenue30")
@@ -380,20 +589,23 @@ class OpsRepository(
         dataSource.connection { connection ->
             val conditions = mutableListOf("t.organization_id=?")
             if (state != null) conditions += "t.state=?"
+            if (!hasGlobalRoomAccess(identity.role)) {
+                conditions += "t.room_id IN (SELECT room_id FROM account_room_scopes WHERE account_id=?)"
+            }
             if (identity.role == Roles.MEMBER) {
-                conditions += "(t.assigned_account_id IS NULL OR t.assigned_account_id=?)"
+                conditions += "((t.state='published' AND t.assigned_account_id IS NULL) OR t.assigned_account_id=?)"
             }
             val sql =
                 """
                 SELECT t.id,t.room_id,t.customer_id,c.display_name,t.title,t.brief,t.state,t.priority,
-                       t.assigned_account_id,t.result_channel,t.result_note,t.next_follow_up_at,
+                       t.assigned_account_id,t.result_channel,t.result_note,t.next_follow_up_at,t.version,
                        COALESCE(SUM(CASE WHEN r.occurred_at>=? THEN r.gross_cents ELSE 0 END),0) revenue30,
                        COALESCE(SUM(r.gross_cents),0) lifetime
                 FROM tasks t JOIN customers c ON c.id=t.customer_id
                 LEFT JOIN revenue_lines r ON r.customer_id=c.id
                 WHERE ${conditions.joinToString(" AND ")}
                 GROUP BY t.id,t.room_id,t.customer_id,c.display_name,t.title,t.brief,t.state,t.priority,
-                         t.assigned_account_id,t.result_channel,t.result_note,t.next_follow_up_at
+                         t.assigned_account_id,t.result_channel,t.result_note,t.next_follow_up_at,t.version
                 ORDER BY t.priority DESC,t.created_at
                 """.trimIndent()
             connection.prepareStatement(sql).use {
@@ -401,6 +613,7 @@ class OpsRepository(
                 it.setLong(index++, now() - 30L * DAY_MS)
                 it.setString(index++, identity.organizationId)
                 if (state != null) it.setString(index++, state)
+                if (!hasGlobalRoomAccess(identity.role)) it.setString(index++, identity.accountId)
                 if (identity.role == Roles.MEMBER) it.setString(index, identity.accountId)
                 it.executeQuery().use { rows ->
                     rows.map {
@@ -422,6 +635,7 @@ class OpsRepository(
                             nextFollowUpAtEpochMs = getNullableLong("next_follow_up_at"),
                             valueLevel = valueLevel(connection, identity.organizationId, revenue30, lifetime),
                             visibleRevenueCents = if (exact) lifetime else null,
+                            version = getInt("version"),
                         )
                     }
                 }
@@ -431,8 +645,14 @@ class OpsRepository(
     fun createTask(identity: RequestIdentity, input: TaskInput): TaskView =
         dataSource.transaction { connection ->
             input.roomId?.let { requireRoomAccess(connection, identity, it) }
+            if (!hasGlobalRoomAccess(identity.role)) {
+                check(input.roomId != null) { "A room-scoped task must specify a room" }
+            }
             val customer = connection.prepareStatement(
-                "SELECT display_name,contact_eligibility FROM customers WHERE id=? AND organization_id=?",
+                """
+                SELECT display_name,contact_eligibility FROM customers
+                WHERE id=? AND organization_id=? FOR UPDATE
+                """.trimIndent(),
             ).use {
                 it.setString(1, input.customerId)
                 it.setString(2, identity.organizationId)
@@ -442,14 +662,35 @@ class OpsRepository(
                 }
             }
             check(customer.second != "do_not_contact") { "该客户已禁止联系" }
-            val active = connection.prepareStatement(
+            val recentContacts = connection.prepareStatement(
                 """
-                SELECT COUNT(*) FROM tasks WHERE organization_id=? AND customer_id=?
-                AND state IN ('published','claimed','assigned','in_progress','submitted')
+                SELECT COUNT(*) FROM tasks
+                WHERE organization_id=? AND customer_id=? AND state='approved' AND reviewed_at>=?
                 """.trimIndent(),
             ).use {
                 it.setString(1, identity.organizationId)
                 it.setString(2, input.customerId)
+                it.setLong(3, now() - CONTACT_WINDOW_MS)
+                it.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
+            }
+            check(recentContacts < CUSTOMER_CONTACT_LIMIT) {
+                "Customer contact limit reached for the last 7 days"
+            }
+            input.assignedAccountId?.let { accountId ->
+                requireAssignableMember(connection, identity.organizationId, accountId, input.roomId)
+                check(memberDailyContactCount(connection, identity.organizationId, accountId) < MEMBER_DAILY_LIMIT) {
+                    "Member daily contact limit reached"
+                }
+            }
+            val active = connection.prepareStatement(
+                """
+                SELECT COUNT(*) FROM tasks
+                WHERE organization_id=? AND customer_id=? AND active_key=?
+                """.trimIndent(),
+            ).use {
+                it.setString(1, identity.organizationId)
+                it.setString(2, input.customerId)
+                it.setString(3, ACTIVE_TASK_KEY)
                 it.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
             }
             check(active == 0) { "该客户已有有效作业" }
@@ -463,13 +704,14 @@ class OpsRepository(
                 state = if (input.assignedAccountId != null) "assigned" else if (input.publish) "published" else "draft",
                 priority = input.priority.coerceIn(0, 100),
                 assignedAccountId = input.assignedAccountId,
+                version = 0,
             )
             connection.prepareStatement(
                 """
                 INSERT INTO tasks(
                     id,organization_id,room_id,customer_id,title,brief,state,priority,
-                    assigned_account_id,created_at,updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    assigned_account_id,created_at,updated_at,version,active_key
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """.trimIndent(),
             ).use {
                 it.setString(1, task.id)
@@ -483,6 +725,8 @@ class OpsRepository(
                 it.setNullableString(9, task.assignedAccountId)
                 it.setLong(10, now())
                 it.setLong(11, now())
+                it.setInt(12, task.version)
+                it.setNullableString(13, if (task.state == "draft") null else ACTIVE_TASK_KEY)
                 it.executeUpdate()
             }
             audit(connection, identity, "task.create", "task", task.id, "创建作业 ${task.title}")
@@ -494,8 +738,36 @@ class OpsRepository(
         taskId: String,
         action: String,
         result: TaskResultInput? = null,
+        expectedVersion: Int? = result?.expectedVersion,
+        clientOperationId: String? = result?.clientOperationId,
     ): TaskView = dataSource.transaction { connection ->
         val current = taskForUpdate(connection, identity.organizationId, taskId)
+        requireTaskRoomAccess(connection, identity, current.roomId)
+        if (!clientOperationId.isNullOrBlank()) {
+            require(clientOperationId.length <= 120) { "Client operation ID is too long" }
+            val duplicate = connection.prepareStatement(
+                """
+                SELECT COUNT(*) FROM task_operations
+                WHERE operation_id=? AND organization_id=? AND account_id=? AND task_id=? AND action=?
+                """.trimIndent(),
+            ).use {
+                it.setString(1, clientOperationId)
+                it.setString(2, identity.organizationId)
+                it.setString(3, identity.accountId)
+                it.setString(4, taskId)
+                it.setString(5, action)
+                it.executeQuery().use { rows -> rows.next(); rows.getInt(1) == 1 }
+            }
+            if (duplicate) return@transaction current
+        }
+        expectedVersion?.let {
+            check(it == current.version) { "Task version conflict; refresh and retry" }
+        }
+        if (identity.role == Roles.MEMBER && action in setOf("claim", "start")) {
+            check(memberDailyContactCount(connection, identity.organizationId, identity.accountId) < MEMBER_DAILY_LIMIT) {
+                "Member daily contact limit reached"
+            }
+        }
         val target = when (action) {
             "claim" -> {
                 check(current.state == "published") { "只有任务池作业可以领取" }
@@ -507,6 +779,7 @@ class OpsRepository(
                 "in_progress"
             }
             "submit" -> {
+                check(current.assignedAccountId == identity.accountId) { "Task is assigned to another member" }
                 check(current.state == "in_progress") { "当前状态不能提交" }
                 requireNotNull(result) { "缺少完成结果" }
                 "submitted"
@@ -538,8 +811,9 @@ class OpsRepository(
                 submitted_at=CASE WHEN ?='submit' THEN ? ELSE submitted_at END,
                 reviewed_at=CASE WHEN ? IN ('approve','reject') THEN ? ELSE reviewed_at END,
                 result_channel=COALESCE(?,result_channel),result_note=COALESCE(?,result_note),
-                next_follow_up_at=COALESCE(?,next_follow_up_at),updated_at=?
-            WHERE id=? AND organization_id=? AND state=?
+                next_follow_up_at=COALESCE(?,next_follow_up_at),updated_at=?,
+                version=version+1,active_key=?
+            WHERE id=? AND organization_id=? AND state=? AND version=?
             """.trimIndent(),
         ).use {
             val now = now()
@@ -553,18 +827,39 @@ class OpsRepository(
             it.setNullableString(12, result?.note)
             it.setNullableLong(13, result?.nextFollowUpAtEpochMs)
             it.setLong(14, now)
-            it.setString(15, taskId)
-            it.setString(16, identity.organizationId)
-            it.setString(17, current.state)
+            it.setNullableString(15, if (target in TERMINAL_TASK_STATES) null else ACTIVE_TASK_KEY)
+            it.setString(16, taskId)
+            it.setString(17, identity.organizationId)
+            it.setString(18, current.state)
+            it.setInt(19, current.version)
             check(it.executeUpdate() == 1) { "作业已被其他人更新，请刷新" }
         }
         audit(connection, identity, "task.$action", "task", taskId, "作业状态 ${current.state} → $target")
+        if (!clientOperationId.isNullOrBlank()) {
+            connection.prepareStatement(
+                """
+                INSERT INTO task_operations(
+                    operation_id,organization_id,account_id,task_id,action,resulting_version,created_at
+                ) VALUES (?,?,?,?,?,?,?)
+                """.trimIndent(),
+            ).use {
+                it.setString(1, clientOperationId)
+                it.setString(2, identity.organizationId)
+                it.setString(3, identity.accountId)
+                it.setString(4, taskId)
+                it.setString(5, action)
+                it.setInt(6, current.version + 1)
+                it.setLong(7, now())
+                it.executeUpdate()
+            }
+        }
         current.copy(
             state = target,
             assignedAccountId = assigned,
             resultChannel = result?.channel ?: current.resultChannel,
             resultNote = result?.note ?: current.resultNote,
             nextFollowUpAtEpochMs = result?.nextFollowUpAtEpochMs ?: current.nextFollowUpAtEpochMs,
+            version = current.version + 1,
         )
     }
 
@@ -860,7 +1155,11 @@ class OpsRepository(
                     while (rows.next()) {
                         val duration = (rows.getLong("end_at") - rows.getLong("start_at")).coerceAtLeast(0)
                         total += rows.getLong("host_fixed_cents")
-                        total += (rows.getLong("host_hourly_cents") * duration.toDouble() / HOUR_MS).roundToLong()
+                        total += FinanceCalculator.prorate(
+                            rows.getLong("host_hourly_cents"),
+                            duration,
+                            HOUR_MS,
+                        )
                     }
                     total
                 }
@@ -964,47 +1263,93 @@ class OpsRepository(
     fun reportSummary(identity: RequestIdentity, start: Long, end: Long): ReportSummary =
         dataSource.connection { connection ->
             require(end > start)
-            val gross = sumLong(
-                connection,
-                "SELECT COALESCE(SUM(gross_cents),0) FROM revenue_lines WHERE organization_id=? AND occurred_at>=? AND occurred_at<?",
-                identity.organizationId,
-                start,
-                end,
-                null,
-            )
-            val taskCounts = connection.prepareStatement(
+            val scoped = !hasGlobalRoomAccess(identity.role)
+            val roomScope = if (scoped) {
+                "AND room_id IN (SELECT room_id FROM account_room_scopes WHERE account_id=?)"
+            } else {
+                ""
+            }
+            val gross = connection.prepareStatement(
                 """
-                SELECT COUNT(*) total,COALESCE(SUM(CASE WHEN state='approved' THEN 1 ELSE 0 END),0) approved
-                FROM tasks WHERE organization_id=? AND created_at>=? AND created_at<?
+                SELECT COALESCE(SUM(gross_cents),0) FROM revenue_lines
+                WHERE organization_id=? AND occurred_at>=? AND occurred_at<? $roomScope
                 """.trimIndent(),
             ).use {
                 it.setString(1, identity.organizationId)
                 it.setLong(2, start)
                 it.setLong(3, end)
-                it.executeQuery().use { rows -> rows.next(); rows.getInt(1) to rows.getInt(2) }
+                if (scoped) it.setString(4, identity.accountId)
+                it.executeQuery().use { rows -> rows.next(); rows.getLong(1) }
             }
-            val customerCount = connection.prepareStatement(
-                "SELECT COUNT(*) FROM customers WHERE organization_id=?",
+            val taskCounts = connection.prepareStatement(
+                """
+                SELECT COUNT(*) total,COALESCE(SUM(CASE WHEN state='approved' THEN 1 ELSE 0 END),0) approved
+                FROM tasks WHERE organization_id=? AND created_at>=? AND created_at<? $roomScope
+                """.trimIndent(),
             ).use {
                 it.setString(1, identity.organizationId)
+                it.setLong(2, start)
+                it.setLong(3, end)
+                if (scoped) it.setString(4, identity.accountId)
+                it.executeQuery().use { rows -> rows.next(); rows.getInt(1) to rows.getInt(2) }
+            }
+            val customerScope = if (scoped) {
+                """
+                AND (
+                    EXISTS (
+                        SELECT 1 FROM interaction_events i
+                        JOIN account_room_scopes s ON s.room_id=i.room_id
+                        WHERE i.customer_id=customers.id AND s.account_id=?
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM revenue_lines r
+                        JOIN account_room_scopes s ON s.room_id=r.room_id
+                        WHERE r.customer_id=customers.id AND s.account_id=?
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM tasks t
+                        JOIN account_room_scopes s ON s.room_id=t.room_id
+                        WHERE t.customer_id=customers.id AND s.account_id=?
+                    )
+                )
+                """.trimIndent()
+            } else {
+                ""
+            }
+            val customerCount = connection.prepareStatement(
+                "SELECT COUNT(*) FROM customers WHERE organization_id=? $customerScope",
+            ).use {
+                it.setString(1, identity.organizationId)
+                if (scoped) {
+                    it.setString(2, identity.accountId)
+                    it.setString(3, identity.accountId)
+                    it.setString(4, identity.accountId)
+                }
                 it.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
             }
             val roomTotals = connection.prepareStatement(
                 """
                 SELECT r.id,r.name,COALESCE(SUM(l.gross_cents),0) gross
                 FROM rooms r LEFT JOIN revenue_lines l ON l.room_id=r.id AND l.occurred_at>=? AND l.occurred_at<?
-                WHERE r.organization_id=? GROUP BY r.id,r.name ORDER BY gross DESC
+                WHERE r.organization_id=?
+                ${if (scoped) "AND r.id IN (SELECT room_id FROM account_room_scopes WHERE account_id=?)" else ""}
+                GROUP BY r.id,r.name ORDER BY gross DESC
                 """.trimIndent(),
             ).use {
                 it.setLong(1, start); it.setLong(2, end); it.setString(3, identity.organizationId)
+                if (scoped) it.setString(4, identity.accountId)
                 it.executeQuery().use { rows -> rows.map { RoomRevenue(getString(1), getString(2), getLong(3)) } }
             }
             val daily = connection.prepareStatement(
-                "SELECT occurred_at,gross_cents FROM revenue_lines WHERE organization_id=? AND occurred_at>=? AND occurred_at<?",
+                """
+                SELECT occurred_at,gross_cents FROM revenue_lines
+                WHERE organization_id=? AND occurred_at>=? AND occurred_at<? $roomScope
+                """.trimIndent(),
             ).use {
                 it.setString(1, identity.organizationId); it.setLong(2, start); it.setLong(3, end)
+                if (scoped) it.setString(4, identity.accountId)
                 it.executeQuery().use { rows ->
-                    val zone = ZoneId.systemDefault()
+                    val zone = BUSINESS_ZONE
                     rows.map { Instant.ofEpochMilli(getLong(1)).atZone(zone).toLocalDate().toString() to getLong(2) }
                         .groupBy({ it.first }, { it.second })
                         .map { DailyRevenue(it.key, it.value.sum()) }
@@ -1035,6 +1380,71 @@ class OpsRepository(
             }
             audit(connection, identity, "device.register", "device", deviceId, "注册厅控设备 ${input.name}")
             DeviceRegistrationResponse(deviceId, secret)
+        }
+
+    fun listDevices(identity: RequestIdentity): List<DeviceView> =
+        dataSource.connection { connection ->
+            val roomScope = if (hasGlobalRoomAccess(identity.role)) {
+                ""
+            } else {
+                "AND room_id IN (SELECT room_id FROM account_room_scopes WHERE account_id=?)"
+            }
+            connection.prepareStatement(
+                """
+                SELECT id,room_id,name,enabled,last_seen_at
+                FROM devices
+                WHERE organization_id=? $roomScope
+                ORDER BY created_at DESC
+                """.trimIndent(),
+            ).use {
+                it.setString(1, identity.organizationId)
+                if (!hasGlobalRoomAccess(identity.role)) it.setString(2, identity.accountId)
+                it.executeQuery().use { rows ->
+                    rows.map {
+                        DeviceView(
+                            id = getString("id"),
+                            roomId = getString("room_id"),
+                            name = getString("name"),
+                            enabled = getBoolean("enabled"),
+                            lastSeenAtEpochMs = getNullableLong("last_seen_at"),
+                        )
+                    }
+                }
+            }
+        }
+
+    fun disableDevice(identity: RequestIdentity, deviceId: String): DeviceView =
+        dataSource.transaction { connection ->
+            val device = connection.prepareStatement(
+                """
+                SELECT id,room_id,name,enabled,last_seen_at
+                FROM devices
+                WHERE id=? AND organization_id=? FOR UPDATE
+                """.trimIndent(),
+            ).use {
+                it.setString(1, deviceId)
+                it.setString(2, identity.organizationId)
+                it.executeQuery().use { rows ->
+                    check(rows.next()) { "Device does not exist" }
+                    DeviceView(
+                        id = rows.getString("id"),
+                        roomId = rows.getString("room_id"),
+                        name = rows.getString("name"),
+                        enabled = rows.getBoolean("enabled"),
+                        lastSeenAtEpochMs = rows.getNullableLong("last_seen_at"),
+                    )
+                }
+            }
+            requireRoomAccess(connection, identity, device.roomId)
+            connection.prepareStatement(
+                "UPDATE devices SET enabled=FALSE WHERE id=? AND organization_id=?",
+            ).use {
+                it.setString(1, deviceId)
+                it.setString(2, identity.organizationId)
+                it.executeUpdate()
+            }
+            audit(connection, identity, "device.disable", "device", deviceId, "Disabled device ${device.name}")
+            device.copy(enabled = false)
         }
 
     fun verifyAndStoreDeviceEvent(
@@ -1148,11 +1558,103 @@ class OpsRepository(
             audit(connection, identity, "value_levels.replace", "settings", null, "更新流水等级规则")
         }
 
+    private fun createRefreshGrant(connection: Connection, account: AuthAccount): RefreshGrant {
+        val refreshToken = SecureTokens.create()
+        val expiresAt = now() + REFRESH_TTL_MS
+        connection.prepareStatement(
+            """
+            INSERT INTO refresh_tokens(
+                id,organization_id,account_id,token_hash,expires_at,created_at
+            ) VALUES (?,?,?,?,?,?)
+            """.trimIndent(),
+        ).use {
+            it.setString(1, id())
+            it.setString(2, account.organizationId)
+            it.setString(3, account.id)
+            it.setString(4, sha256(refreshToken))
+            it.setLong(5, expiresAt)
+            it.setLong(6, now())
+            it.executeUpdate()
+        }
+        return RefreshGrant(account, refreshToken, REFRESH_TTL_MS / 1_000L)
+    }
+
+    private fun requireAssignableMember(
+        connection: Connection,
+        organizationId: String,
+        accountId: String,
+        roomId: String?,
+    ) {
+        val accountRole = connection.prepareStatement(
+            """
+            SELECT role FROM accounts
+            WHERE id=? AND organization_id=? AND enabled=TRUE
+            """.trimIndent(),
+        ).use {
+            it.setString(1, accountId)
+            it.setString(2, organizationId)
+            it.executeQuery().use { rows ->
+                check(rows.next()) { "Assigned account does not exist" }
+                rows.getString(1)
+            }
+        }
+        check(accountRole == Roles.MEMBER) { "Tasks can only be assigned to members" }
+        if (roomId != null) {
+            val hasScope = connection.prepareStatement(
+                "SELECT COUNT(*) FROM account_room_scopes WHERE account_id=? AND room_id=?",
+            ).use {
+                it.setString(1, accountId)
+                it.setString(2, roomId)
+                it.executeQuery().use { rows -> rows.next(); rows.getInt(1) == 1 }
+            }
+            check(hasScope) { "Assigned member does not have access to this room" }
+        }
+    }
+
+    private fun memberDailyContactCount(
+        connection: Connection,
+        organizationId: String,
+        accountId: String,
+        currentTime: Long = now(),
+    ): Int {
+        val startOfDay = Instant.ofEpochMilli(currentTime)
+            .atZone(BUSINESS_ZONE)
+            .toLocalDate()
+            .atStartOfDay(BUSINESS_ZONE)
+            .toInstant()
+            .toEpochMilli()
+        return connection.prepareStatement(
+            """
+            SELECT COUNT(*) FROM tasks
+            WHERE organization_id=? AND assigned_account_id=?
+              AND state IN ('submitted','approved')
+              AND submitted_at>=?
+            """.trimIndent(),
+        ).use {
+            it.setString(1, organizationId)
+            it.setString(2, accountId)
+            it.setLong(3, startOfDay)
+            it.executeQuery().use { rows -> rows.next(); rows.getInt(1) }
+        }
+    }
+
+    private fun requireTaskRoomAccess(
+        connection: Connection,
+        identity: RequestIdentity,
+        roomId: String?,
+    ) {
+        if (roomId != null) {
+            requireRoomAccess(connection, identity, roomId)
+        } else {
+            check(hasGlobalRoomAccess(identity.role)) { "Room-scoped accounts cannot access global tasks" }
+        }
+    }
+
     private fun taskForUpdate(connection: Connection, orgId: String, taskId: String): TaskView =
         connection.prepareStatement(
             """
             SELECT t.id,t.room_id,t.customer_id,c.display_name,t.title,t.brief,t.state,t.priority,
-                   t.assigned_account_id,t.result_channel,t.result_note,t.next_follow_up_at
+                   t.assigned_account_id,t.result_channel,t.result_note,t.next_follow_up_at,t.version
             FROM tasks t JOIN customers c ON c.id=t.customer_id
             WHERE t.id=? AND t.organization_id=? FOR UPDATE
             """.trimIndent(),
@@ -1166,6 +1668,7 @@ class OpsRepository(
                     rows.getString("state"), rows.getInt("priority"), rows.getString("assigned_account_id"),
                     rows.getString("result_channel"), rows.getString("result_note"),
                     rows.getNullableLong("next_follow_up_at"),
+                    version = rows.getInt("version"),
                 )
             }
         }
@@ -1341,8 +1844,19 @@ class OpsRepository(
     companion object {
         private const val DAY_MS = 86_400_000L
         private const val HOUR_MS = 3_600_000L
+        private const val REFRESH_TTL_MS = 30L * DAY_MS
+        private const val LOGIN_WINDOW_MS = 15L * 60_000L
+        private const val LOGIN_BLOCK_MS = 15L * 60_000L
+        private const val LOGIN_MAX_FAILURES = 5
+        private const val CONTACT_WINDOW_MS = 7L * DAY_MS
+        private const val CUSTOMER_CONTACT_LIMIT = 2
+        private const val MEMBER_DAILY_LIMIT = 20
+        private const val ACTIVE_TASK_KEY = "active"
+        private val TERMINAL_TASK_STATES = setOf("approved", "rejected", "cancelled")
+        private val BUSINESS_ZONE: ZoneId = ZoneId.of("Asia/Shanghai")
         private fun id(): String = UUID.randomUUID().toString()
         private fun now(): Long = System.currentTimeMillis()
+        private fun loginKey(username: String): String = username.trim().lowercase().take(160)
         private fun hasGlobalRoomAccess(role: String) =
             role in setOf(Roles.OWNER, Roles.ADMIN, Roles.FINANCE, Roles.AUDITOR)
     }
@@ -1378,6 +1892,7 @@ private fun ResultSet.authAccount() = AuthAccount(
     getString("password_hash"),
     getBoolean("enabled"),
     getString("totp_secret"),
+    getInt("token_version"),
 )
 
 private fun ResultSet.accountView() = AccountView(

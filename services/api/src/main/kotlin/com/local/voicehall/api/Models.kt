@@ -16,8 +16,28 @@ data class LoginRequest(
 data class LoginResponse(
     val accessToken: String,
     val expiresInSeconds: Long,
+    val refreshToken: String,
+    val refreshExpiresInSeconds: Long,
     val account: AccountView,
     val permissions: Set<String>,
+)
+
+@Serializable
+data class RefreshRequest(val refreshToken: String)
+
+@Serializable
+data class LogoutRequest(val refreshToken: String)
+
+@Serializable
+data class ChangePasswordRequest(
+    val currentPassword: String,
+    val newPassword: String,
+)
+
+@Serializable
+data class ChangePasswordResponse(
+    val status: String = "password_changed",
+    val reauthenticationRequired: Boolean = true,
 )
 
 @Serializable
@@ -122,6 +142,8 @@ data class TaskResultInput(
     val channel: String,
     val note: String,
     val nextFollowUpAtEpochMs: Long? = null,
+    val expectedVersion: Int? = null,
+    val clientOperationId: String? = null,
 )
 
 @Serializable
@@ -140,6 +162,7 @@ data class TaskView(
     val nextFollowUpAtEpochMs: Long? = null,
     val valueLevel: String = "standard",
     val visibleRevenueCents: Long? = null,
+    val version: Int = 0,
 )
 
 @Serializable
@@ -256,6 +279,15 @@ data class DeviceRegistrationInput(val roomId: String, val name: String)
 data class DeviceRegistrationResponse(val deviceId: String, val deviceSecret: String)
 
 @Serializable
+data class DeviceView(
+    val id: String,
+    val roomId: String,
+    val name: String,
+    val enabled: Boolean,
+    val lastSeenAtEpochMs: Long? = null,
+)
+
+@Serializable
 data class DeviceEventInput(
     val eventId: String,
     val type: String,
@@ -302,4 +334,11 @@ data class AuthAccount(
     val passwordHash: String,
     val enabled: Boolean,
     val totpSecret: String?,
+    val tokenVersion: Int,
+)
+
+data class RefreshGrant(
+    val account: AuthAccount,
+    val refreshToken: String,
+    val refreshExpiresInSeconds: Long,
 )

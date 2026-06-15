@@ -1,6 +1,6 @@
 package com.local.voicehall.api
 
-import kotlin.math.roundToLong
+import java.math.BigInteger
 
 data class FinanceInputs(
     val grossCents: Long,
@@ -48,7 +48,18 @@ object FinanceCalculator {
         )
     }
 
-    private fun multiplyBps(cents: Long, bps: Int): Long =
-        (cents.toDouble() * bps.toDouble() / 10_000.0).roundToLong()
-}
+    internal fun multiplyBps(cents: Long, bps: Int): Long =
+        multiplyRatio(cents, bps.toLong(), 10_000L)
 
+    internal fun prorate(centsPerUnit: Long, usedUnits: Long, unitsPerWhole: Long): Long =
+        multiplyRatio(centsPerUnit, usedUnits, unitsPerWhole)
+
+    private fun multiplyRatio(value: Long, numerator: Long, denominator: Long): Long {
+        require(value >= 0 && numerator >= 0 && denominator > 0)
+        val product = BigInteger.valueOf(value).multiply(BigInteger.valueOf(numerator))
+        val divisor = BigInteger.valueOf(denominator)
+        val parts = product.divideAndRemainder(divisor)
+        val rounded = if (parts[1].shiftLeft(1) >= divisor) parts[0] + BigInteger.ONE else parts[0]
+        return rounded.longValueExact()
+    }
+}

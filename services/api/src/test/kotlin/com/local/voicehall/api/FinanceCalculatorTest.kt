@@ -1,5 +1,7 @@
 package com.local.voicehall.api
 
+import java.math.BigInteger
+import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
@@ -26,5 +28,28 @@ class FinanceCalculatorTest {
         assertEquals(19_000, result.accountsPayableCents)
         assertEquals(21_000, result.netProfitCents)
     }
-}
 
+    @Test
+    fun roundsBasisPointsWithoutFloatingPoint() {
+        val random = Random(42)
+        repeat(2_000) {
+            val cents = random.nextLong(0, 10_000_000_000L)
+            val bps = random.nextInt(0, 10_001)
+            val product = BigInteger.valueOf(cents).multiply(BigInteger.valueOf(bps.toLong()))
+            val divisor = BigInteger.valueOf(10_000)
+            val parts = product.divideAndRemainder(divisor)
+            val expected = if (parts[1].shiftLeft(1) >= divisor) {
+                parts[0] + BigInteger.ONE
+            } else {
+                parts[0]
+            }.longValueExact()
+            assertEquals(expected, FinanceCalculator.multiplyBps(cents, bps))
+        }
+    }
+
+    @Test
+    fun proratesHostCostUsingIntegerDuration() {
+        assertEquals(3_333, FinanceCalculator.prorate(10_000, 1_200_000, 3_600_000))
+        assertEquals(5_000, FinanceCalculator.prorate(10_000, 1_800_000, 3_600_000))
+    }
+}

@@ -91,6 +91,7 @@ fun Application.module(
         allowHeader("X-Device-Id")
         allowHeader("X-Timestamp")
         allowHeader("X-Signature")
+        allowHeader("X-Client-Operation-Id")
         allowCredentials = false
         env["CORS_HOSTS"]
             ?.split(',')
@@ -121,8 +122,11 @@ fun Application.module(
                 val subject = credential.payload.subject
                 val org = credential.payload.getClaim("org").asString()
                 val role = credential.payload.getClaim("role").asString()
-                if (subject.isNullOrBlank() || org.isNullOrBlank() || role.isNullOrBlank()) null
-                else JWTPrincipal(credential.payload)
+                val tokenVersion = credential.payload.getClaim("ver").asInt() ?: 0
+                if (
+                    subject.isNullOrBlank() || org.isNullOrBlank() || role.isNullOrBlank() ||
+                    !repository.isAccessTokenValid(subject, org, tokenVersion)
+                ) null else JWTPrincipal(credential.payload)
             }
         }
     }
@@ -134,18 +138,27 @@ fun Application.module(
         route("/auth") {
             post("/login") {
                 val request = call.receive<LoginRequest>()
+                if (!repository.isLoginAllowed(request.username)) {
+                    call.respond(HttpStatusCode.TooManyRequests, ApiError("Too many login attempts; retry later"))
+                    return@post
+                }
                 val account = repository.findAccount(request.username)
                 if (account == null || !account.enabled ||
                     !Passwords.verify(account.passwordHash, request.password.toCharArray()) ||
                     (account.totpSecret != null && !Totp.verify(account.totpSecret, request.otp))
                 ) {
+                    repository.recordLoginFailure(request.username)
                     call.respond(HttpStatusCode.Unauthorized, ApiError("用户名、密码或动态验证码错误"))
                     return@post
                 }
+                repository.clearLoginFailures(request.username)
+                val grant = repository.issueRefreshToken(account)
                 call.respond(
                     LoginResponse(
                         jwt.token(account),
                         900,
+                        grant.refreshToken,
+                        grant.refreshExpiresInSeconds,
                         AccountView(
                             account.id,
                             account.organizationId,
@@ -156,6 +169,34 @@ fun Application.module(
                         Roles.permissionsFor(account.role),
                     ),
                 )
+            }
+            post("/refresh") {
+                val request = call.receive<RefreshRequest>()
+                val grant = runCatching { repository.rotateRefreshToken(request.refreshToken) }
+                    .getOrElse {
+                        call.respond(HttpStatusCode.Unauthorized, ApiError("Refresh token is invalid or expired"))
+                        return@post
+                    }
+                call.respond(
+                    LoginResponse(
+                        accessToken = jwt.token(grant.account),
+                        expiresInSeconds = 900,
+                        refreshToken = grant.refreshToken,
+                        refreshExpiresInSeconds = grant.refreshExpiresInSeconds,
+                        account = AccountView(
+                            grant.account.id,
+                            grant.account.organizationId,
+                            grant.account.username,
+                            grant.account.displayName,
+                            grant.account.role,
+                        ),
+                        permissions = Roles.permissionsFor(grant.account.role),
+                    ),
+                )
+            }
+            post("/logout") {
+                repository.revokeRefreshToken(call.receive<LogoutRequest>().refreshToken)
+                call.respond(mapOf("status" to "logged_out"))
             }
         }
 
@@ -195,6 +236,11 @@ fun Application.module(
         authenticate("auth-jwt") {
             get("/auth/me") {
                 call.respond(repository.getAccount(call.identity()))
+            }
+            post("/auth/change-password") {
+                val request = call.receive<ChangePasswordRequest>()
+                repository.changePassword(call.identity(), request.currentPassword, request.newPassword)
+                call.respond(ChangePasswordResponse())
             }
             route("/accounts") {
                 get {
@@ -246,6 +292,7 @@ fun Application.module(
             }
             route("/tasks") {
                 get {
+                    call.requirePermission("tasks.read")
                     call.respond(repository.listTasks(call.identity(), call.request.queryParameters["state"]))
                 }
                 post {
@@ -254,11 +301,27 @@ fun Application.module(
                 }
                 post("/{id}/claim") {
                     call.requirePermission("tasks.claim")
-                    call.respond(repository.transitionTask(call.identity(), call.requiredId(), "claim"))
+                    call.respond(
+                        repository.transitionTask(
+                            call.identity(),
+                            call.requiredId(),
+                            "claim",
+                            expectedVersion = call.request.queryParameters["expectedVersion"]?.toIntOrNull(),
+                            clientOperationId = call.request.headers["X-Client-Operation-Id"],
+                        ),
+                    )
                 }
                 post("/{id}/start") {
                     call.requirePermission("tasks.execute")
-                    call.respond(repository.transitionTask(call.identity(), call.requiredId(), "start"))
+                    call.respond(
+                        repository.transitionTask(
+                            call.identity(),
+                            call.requiredId(),
+                            "start",
+                            expectedVersion = call.request.queryParameters["expectedVersion"]?.toIntOrNull(),
+                            clientOperationId = call.request.headers["X-Client-Operation-Id"],
+                        ),
+                    )
                 }
                 post("/{id}/submit") {
                     call.requirePermission("tasks.execute")
@@ -304,7 +367,7 @@ fun Application.module(
                     call.respond(mapOf("id" to repository.addExpense(call.identity(), call.receive())))
                 }
                 post("/preview") {
-                    call.requirePermission("reports.read")
+                    call.requirePermission("finance.read")
                     call.respond(repository.previewSettlement(call.identity(), call.receive()))
                 }
                 post("/close") {
@@ -323,9 +386,17 @@ fun Application.module(
                 call.respond(repository.reportSummary(call.identity(), start, end))
             }
             route("/devices") {
+                get {
+                    call.requirePermission("devices.write")
+                    call.respond(repository.listDevices(call.identity()))
+                }
                 post("/register") {
                     call.requirePermission("devices.write")
                     call.respond(HttpStatusCode.Created, repository.registerDevice(call.identity(), call.receive()))
+                }
+                post("/{id}/disable") {
+                    call.requirePermission("devices.write")
+                    call.respond(repository.disableDevice(call.identity(), call.requiredId()))
                 }
             }
             get("/audit") {
