@@ -15,3 +15,14 @@
 - 微信和映客真机校准。
 - 纯文字、1/2/3 图的真实人工跟进流程。
 - 断网、恢复、设备时钟偏差和 30 天备份恢复演练。
+
+## 比赛环境快速验证
+
+```powershell
+.\scripts\smoke-web.ps1
+.\scripts\reset-demo.ps1 -SkipBuild
+.\scripts\start-demo.ps1
+.\scripts\stop-demo.ps1
+```
+
+`smoke-web.ps1` 使用独立内存数据库并自动清理进程；`reset-demo.ps1` 只重建 `build/demo` 下经过路径校验的专用演示数据库。

@@ -1,27 +1,37 @@
-# 1.0.0 验收记录
+# 1.0.0 比赛冲刺验收记录
 
-验证日期：2026-06-14
+验证日期：2026-06-15
 
-## 已通过
+## 已自动验证
 
-- 后台 `test buildFatJar`：通过。覆盖 Argon2id 登录、可选 TOTP、厅房创建、排班冲突、账单总额校验、设备 HMAC 与事件幂等。
-- 发布 JAR 独立启动：使用 H2 发布验证库启动 `voice-hall-ops-api-1.0.0.jar`，`GET /health` 返回 `status=ok`、`version=1.0.0`。
-- 管理台：Vitest 2 项通过，TypeScript 与 Vite 生产构建通过；本地浏览器已验证登录、看板和厅房页面切换。
-- 成员端：JVM 单元测试、Release Lint、签名 release 构建通过；Room `5 → 6` 迁移 instrumentation 测试源码编译通过。
-- 厅控端：JVM 单元测试、Release Lint、签名 release 构建通过；Room `1 → 2` 迁移 instrumentation 测试源码编译通过。
-- APK 签名：两个 APK 均通过 APK Signature Scheme v2 验证，证书 SHA-256 为 `9445a3629afe47529cd253c67b3816efd17d287795385b0f38cd1791a79ad0cd`。
-- 覆盖签名：新成员端与旧关系助手、新厅控端与旧麦序机器人证书 SHA-256 一致。
-- 成员端权限：仅 `INTERNET`、`ACCESS_NETWORK_STATE` 及 AndroidX 自动生成的非导出动态接收器权限。
-- 厅控端权限：联网、通知、前台服务、连接设备前台服务、唤醒锁；无障碍服务由系统通过 `BIND_ACCESSIBILITY_SERVICE` 授予。
-- 财务样表：XLSX 公式与中文内容检查通过，并完成全部工作表渲染预览。
-- 源码部署 ZIP：内容白名单检查通过，不含 JKS、`keystore.properties`、`local.properties`、`node_modules`、Gradle 缓存或运行数据库。
-- Docker Compose：PostgreSQL、MinIO、API、Caddy、健康检查、生产密钥变量和 HTTPS 端口结构检查通过。
+- 后台：14 项测试、`buildFatJar` 和发布 JAR 独立健康检查通过。
+- 管理台：15 项 Vitest、TypeScript 和 Vite 生产构建通过；前端代理冒烟覆盖登录、刷新令牌轮换、注销、厅控和财务接口。
+- 成员端：19 项 JVM 测试和签名 release 构建通过；Room `6 → 7` 迁移源码可编译。
+- 厅控端：11 项 JVM 测试和签名 release 构建通过；Room 迁移、排麦、主持插入、10 秒防抖和事件同步测试通过。
+- 财务：全程整数分/`BigInteger`，随机属性测试验证固定勾稽公式；演示结算总流水 512,300 分、净利润 225,599 分、勾稽差额 0。
+- 厅控投影：绑定、队列、麦时和出勤事件按事件 ID 幂等处理，页面不可读时停止推算。
+- 演示环境：`reset-demo.ps1` 可重建独立 H2 数据库；`start-demo.ps1`、API 代理健康检查和 `stop-demo.ps1` 已通过。
+- 管理台体积：首屏主脚本约 241.8 KB；约 429.2 KB 的 XLSX 依赖改为按需加载。
+- APK 签名：两个 APK 均通过 APK Signature Scheme v2，证书 SHA-256 为 `9445a3629afe47529cd253c67b3816efd17d287795385b0f38cd1791a79ad0cd`。
+- 成员端权限：仅联网权限和 AndroidX 内部动态接收器权限，不含无障碍服务。
+- 厅控端权限：联网、通知、前台服务、连接设备前台服务和唤醒锁；是唯一声明 `BIND_ACCESSIBILITY_SERVICE` 的 APK。
+- 源码部署 ZIP：238 个条目通过白名单检查，不含签名密钥、`local.properties`、`node_modules`、Gradle 缓存、构建目录或运行数据库。
+- Git 工作区：全部冲刺变更已按安全、厅控、财务、成员端和演示批次提交，最终构建时工作区清洁。
 
-## 待真机或部署环境完成
+## 当前发布产物
 
-- 当前 ADB 无连接设备，未执行两套 Android instrumentation 测试、覆盖安装和离线重连实机验收。
-- 未完成微信与映客 `9.8.60` 真机页面校准，因此正式适配器保持不可用状态，不宣称真实环境自动回复或麦位识别已验证。
-- 本机没有 Docker Engine，未执行 PostgreSQL/MinIO/Caddy 容器启动、备份恢复和 HTTPS 域名端到端验收。
-- 正式上线前仍需在目标 VPS 执行一次账单导入、结算关闭、调整单、日周月报表和加密备份恢复演练。
+- `voice-hall-ops-api-1.0.0.jar`
+- `voice-hall-admin-1.0.0.zip`
+- `voice-hall-member-2.0.0.apk`
+- `voice-hall-control-1.0.0.apk`
+- `voice-hall-ops-suite-1.0.0-source-and-deploy.zip`
 
-最终文件哈希以 `artifacts/SHA256SUMS.txt` 为准。
+最终哈希以 `artifacts/SHA256SUMS.txt` 为准。
+
+## 待真机或 VPS 完成
+
+- 当前 `adb devices -l` 无连接设备，尚未执行 Android instrumentation、覆盖安装和断线重连真机验收。
+- 微信和映客页面适配器尚未在两台目标真机校准；正式能力必须继续显示“待校准”，不得宣称自动回复或麦位识别已真实验证。
+- 本机没有 Docker Engine，只完成 Compose、Caddy、备份脚本和 CI 的静态检查；PostgreSQL、MinIO、HTTPS 和加密备份恢复必须在目标 VPS 实跑。
+- 最新管理台无法通过当前 Browser 插件执行视觉自动化；已用生产构建和前后端代理冒烟兜底，比赛前仍需人工检查 12 个页面的布局与中文显示。
+- 正式发布前需完成 8 分钟计时彩排、真机失败后 15 秒切换模拟环境，以及本机/VPS/录屏三路兜底。
