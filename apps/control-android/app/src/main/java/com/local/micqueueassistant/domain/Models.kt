@@ -44,6 +44,43 @@ data class SeatSnapshotPayload(
 )
 
 @Serializable
+data class ControlShiftEventPayload(
+    val shiftId: String,
+    val label: String,
+    val startAtEpochMs: Long,
+    val endAtEpochMs: Long,
+    val capacity: Int,
+    val cutoffAtEpochMs: Long,
+    val state: String,
+    val createdBy: String,
+    val updatedAtEpochMs: Long,
+)
+
+@Serializable
+data class BindingEventPayload(
+    val bindingId: String,
+    val wechatName: String,
+    val ingkeeName: String,
+    val state: String,
+    val approvedBy: String? = null,
+    val createdAtEpochMs: Long,
+    val updatedAtEpochMs: Long,
+)
+
+@Serializable
+data class QueueEntryEventPayload(
+    val entryId: String,
+    val shiftId: String,
+    val wechatName: String,
+    val role: String,
+    val position: Int,
+    val state: String,
+    val createdBy: String,
+    val createdAtEpochMs: Long,
+    val updatedAtEpochMs: Long,
+)
+
+@Serializable
 data class WireEnvelope(
     val type: String,
     val deviceId: String,

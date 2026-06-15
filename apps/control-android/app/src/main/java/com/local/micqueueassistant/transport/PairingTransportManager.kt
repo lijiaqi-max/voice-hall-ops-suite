@@ -139,7 +139,9 @@ object PairingTransportManager {
         require(config.cloudRoomId.isNotBlank() && config.cloudDeviceId.isNotBlank()) {
             "设备尚未注册"
         }
-        repository.pendingCollectorEvents().forEach { row ->
+        repository.pendingCollectorEvents()
+            .sortedWith(compareBy({ eventPriority(it.type) }, { it.createdAtEpochMs }, { it.id }))
+            .forEach { row ->
             val event = CloudDeviceEvent(
                 eventId = row.eventId,
                 type = row.type,
@@ -161,11 +163,20 @@ object PairingTransportManager {
                 ),
             )
             val ack = json.decodeFromString<DeviceAck>(response)
+            check(ack.accepted) { "Server retained the event but projection failed; retry is required" }
             check(ack.eventId == row.eventId) { "服务器确认事件不匹配" }
             repository.markCollectorEventSent(row.id)
         }
         repository.markCloudSync()
         repository.setForegroundServiceEnabled(true)
+    }
+
+    private fun eventPriority(type: String): Int = when (type) {
+        "shift_upsert" -> 0
+        "binding_upsert" -> 1
+        "queue_entry_upsert" -> 2
+        "seat_snapshot" -> 3
+        else -> 9
     }
 
     private fun hmac(secret: String, value: String): String {

@@ -16,10 +16,13 @@ import com.local.micqueueassistant.data.ReplyEntity
 import com.local.micqueueassistant.data.SeatSnapshotEntity
 import com.local.micqueueassistant.data.ShiftEntity
 import com.local.micqueueassistant.domain.CommandParser
+import com.local.micqueueassistant.domain.BindingEventPayload
+import com.local.micqueueassistant.domain.ControlShiftEventPayload
 import com.local.micqueueassistant.domain.DeviceRole
 import com.local.micqueueassistant.domain.GroupCommand
 import com.local.micqueueassistant.domain.IncomingGroupMessage
 import com.local.micqueueassistant.domain.QueuePolicy
+import com.local.micqueueassistant.domain.QueueEntryEventPayload
 import com.local.micqueueassistant.domain.QueueRole
 import com.local.micqueueassistant.domain.SeatSnapshotPayload
 import com.local.micqueueassistant.domain.SegmentState
@@ -269,6 +272,7 @@ class MicQueueRepository(
                 createdBy = sender,
             )
             dao.saveShift(shift)
+            enqueueShiftProjection(shift)
             QueuePolicy.formatQueue(shift, emptyList())
         }
         is GroupCommand.Join -> {
@@ -286,6 +290,7 @@ class MicQueueRepository(
                 now = now,
             )
             dao.saveQueueEntry(updated.last())
+            enqueueQueueProjections(listOf(updated.last()))
             QueuePolicy.formatQueue(shift, dao.getQueue(shift.id))
         }
         GroupCommand.Cancel -> {
@@ -293,6 +298,7 @@ class MicQueueRepository(
             check(dao.cancelQueueEntry(shift.id, sender) > 0) { "你不在当前麦序中" }
             val compacted = QueuePolicy.compact(dao.getQueue(shift.id), now)
             dao.replaceQueue(compacted)
+            enqueueQueueProjections(compacted)
             QueuePolicy.formatQueue(shift, dao.getQueue(shift.id))
         }
         is GroupCommand.InsertHost -> {
@@ -309,13 +315,19 @@ class MicQueueRepository(
             )
             dao.replaceQueue(updated.filter { it.id != updated.last().id })
             dao.saveQueueEntry(updated.last())
+            enqueueQueueProjections(updated)
             QueuePolicy.formatQueue(shift, dao.getQueue(shift.id))
         }
         GroupCommand.CloseShift -> {
             requireAdmin(isAdmin)
             val shift = dao.getOpenShift() ?: error("没有开放班次")
             dao.updateShiftState(shift.id, ShiftState.CLOSED.value)
-            QueuePolicy.formatQueue(shift.copy(state = ShiftState.CLOSED.value), dao.getQueue(shift.id))
+            val closedShift = shift.copy(
+                state = ShiftState.CLOSED.value,
+                updatedAtEpochMs = now,
+            )
+            enqueueShiftProjection(closedShift)
+            QueuePolicy.formatQueue(closedShift, dao.getQueue(shift.id))
         }
         GroupCommand.ShowQueue -> {
             val shift = dao.getOpenShift()
@@ -334,6 +346,7 @@ class MicQueueRepository(
                 updatedAtEpochMs = now,
             )
             dao.saveBinding(binding)
+            enqueueBindingProjection(binding)
             "绑定申请已记录：微信 @$sender → 映客 ${command.ingkeeName}，等待管理员确认"
         }
         is GroupCommand.Total -> {
@@ -359,6 +372,13 @@ class MicQueueRepository(
         check(dao.isAdmin(adminName) > 0) { "只有管理员可以确认绑定" }
         val binding = bindings.value.firstOrNull { it.id == id } ?: error("绑定不存在")
         dao.updateBindingState(id, "approved", adminName)
+        enqueueBindingProjection(
+            binding.copy(
+                state = "approved",
+                approvedBy = adminName,
+                updatedAtEpochMs = System.currentTimeMillis(),
+            ),
+        )
         val queue = shifts.value.firstOrNull()?.let { dao.activeQueueEntry(it.id, binding.wechatName) }
         dao.backfillBinding(
             ingkeeName = binding.ingkeeName,
@@ -372,7 +392,15 @@ class MicQueueRepository(
 
     suspend fun rejectBinding(id: String, adminName: String): Result<String> = runCatching {
         check(dao.isAdmin(adminName) > 0) { "只有管理员可以拒绝绑定" }
+        val binding = bindings.value.firstOrNull { it.id == id } ?: error("Binding does not exist")
         dao.updateBindingState(id, "rejected", adminName)
+        enqueueBindingProjection(
+            binding.copy(
+                state = "rejected",
+                approvedBy = adminName,
+                updatedAtEpochMs = System.currentTimeMillis(),
+            ),
+        )
         "绑定已拒绝"
     }
 
@@ -462,11 +490,12 @@ class MicQueueRepository(
     suspend fun enqueueCollectorEvent(
         eventId: String,
         payloadJson: String,
+        type: String = "seat_snapshot",
     ): CollectorEventEntity {
         val row = CollectorEventEntity(
             id = UUID.randomUUID().toString(),
             eventId = eventId,
-            type = "seat_snapshot",
+            type = type,
             payloadJson = payloadJson,
         )
         val inserted = dao.insertCollectorEvent(row)
@@ -475,6 +504,84 @@ class MicQueueRepository(
         } else {
             row
         }
+    }
+
+    private suspend fun enqueueShiftProjection(shift: ShiftEntity) {
+        enqueueCloudProjection(
+            type = "shift_upsert",
+            entityId = shift.id,
+            updatedAt = shift.updatedAtEpochMs,
+            payload = json.encodeToString(
+                ControlShiftEventPayload(
+                    shiftId = shift.id,
+                    label = shift.label,
+                    startAtEpochMs = shift.startAtEpochMs,
+                    endAtEpochMs = shift.endAtEpochMs,
+                    capacity = shift.capacity,
+                    cutoffAtEpochMs = shift.cutoffAtEpochMs,
+                    state = shift.state,
+                    createdBy = shift.createdBy,
+                    updatedAtEpochMs = shift.updatedAtEpochMs,
+                ),
+            ),
+        )
+    }
+
+    private suspend fun enqueueBindingProjection(binding: MemberBindingEntity) {
+        enqueueCloudProjection(
+            type = "binding_upsert",
+            entityId = binding.id,
+            updatedAt = binding.updatedAtEpochMs,
+            payload = json.encodeToString(
+                BindingEventPayload(
+                    bindingId = binding.id,
+                    wechatName = binding.wechatName,
+                    ingkeeName = binding.ingkeeName,
+                    state = binding.state,
+                    approvedBy = binding.approvedBy,
+                    createdAtEpochMs = binding.createdAtEpochMs,
+                    updatedAtEpochMs = binding.updatedAtEpochMs,
+                ),
+            ),
+        )
+    }
+
+    private suspend fun enqueueQueueProjections(entries: Collection<QueueEntryEntity>) {
+        entries.forEach { entry ->
+            enqueueCloudProjection(
+                type = "queue_entry_upsert",
+                entityId = entry.id,
+                updatedAt = entry.updatedAtEpochMs,
+                payload = json.encodeToString(
+                    QueueEntryEventPayload(
+                        entryId = entry.id,
+                        shiftId = entry.shiftId,
+                        wechatName = entry.wechatName,
+                        role = entry.role,
+                        position = entry.position,
+                        state = entry.state,
+                        createdBy = entry.createdBy,
+                        createdAtEpochMs = entry.createdAtEpochMs,
+                        updatedAtEpochMs = entry.updatedAtEpochMs,
+                    ),
+                ),
+            )
+        }
+    }
+
+    private suspend fun enqueueCloudProjection(
+        type: String,
+        entityId: String,
+        updatedAt: Long,
+        payload: String,
+    ) {
+        val current = dao.getConfig() ?: return
+        if (!current.cloudSyncEnabled) return
+        enqueueCollectorEvent(
+            eventId = stableId("cloud-event", "$type|$entityId|$updatedAt"),
+            payloadJson = payload,
+            type = type,
+        )
     }
 
     suspend fun pendingCollectorEvents(): List<CollectorEventEntity> =

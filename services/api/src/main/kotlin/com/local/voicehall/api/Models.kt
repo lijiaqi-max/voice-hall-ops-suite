@@ -307,6 +307,121 @@ data class DeviceWsEnvelope(
 data class DeviceAck(val eventId: String, val accepted: Boolean)
 
 @Serializable
+data class SeatObservationPayload(
+    val seatIndex: Int,
+    val ingkeeName: String,
+)
+
+@Serializable
+data class SeatSnapshotEventPayload(
+    val eventId: String,
+    val capturedAtEpochMs: Long,
+    val seats: List<SeatObservationPayload>,
+    val pageStatus: String,
+    val source: String,
+)
+
+@Serializable
+data class ControlShiftEventPayload(
+    val shiftId: String,
+    val label: String,
+    val startAtEpochMs: Long,
+    val endAtEpochMs: Long,
+    val capacity: Int,
+    val cutoffAtEpochMs: Long,
+    val state: String,
+    val createdBy: String,
+    val updatedAtEpochMs: Long,
+)
+
+@Serializable
+data class BindingEventPayload(
+    val bindingId: String,
+    val wechatName: String,
+    val ingkeeName: String,
+    val state: String,
+    val approvedBy: String? = null,
+    val createdAtEpochMs: Long,
+    val updatedAtEpochMs: Long,
+)
+
+@Serializable
+data class QueueEntryEventPayload(
+    val entryId: String,
+    val shiftId: String,
+    val wechatName: String,
+    val role: String,
+    val position: Int,
+    val state: String,
+    val createdBy: String,
+    val createdAtEpochMs: Long,
+    val updatedAtEpochMs: Long,
+)
+
+@Serializable
+data class MicSegmentView(
+    val id: String,
+    val roomId: String,
+    val shiftId: String? = null,
+    val bindingId: String? = null,
+    val wechatName: String? = null,
+    val ingkeeName: String,
+    val role: String,
+    val queuePosition: Int? = null,
+    val startedAtEpochMs: Long,
+    val lastSeenAtEpochMs: Long,
+    val endedAtEpochMs: Long? = null,
+    val durationSeconds: Long,
+    val state: String,
+    val correctionReason: String? = null,
+)
+
+@Serializable
+data class QueueEntryView(
+    val id: String,
+    val roomId: String,
+    val shiftId: String,
+    val bindingId: String? = null,
+    val wechatName: String,
+    val role: String,
+    val position: Int,
+    val state: String,
+    val updatedAtEpochMs: Long,
+)
+
+@Serializable
+data class BindingView(
+    val id: String,
+    val roomId: String,
+    val externalBindingId: String,
+    val wechatName: String,
+    val ingkeeName: String,
+    val state: String,
+    val approvedBy: String? = null,
+    val updatedAtEpochMs: Long,
+)
+
+@Serializable
+data class AttendanceView(
+    val id: String,
+    val roomId: String,
+    val shiftId: String,
+    val bindingId: String? = null,
+    val wechatName: String? = null,
+    val ingkeeName: String,
+    val firstSeenAtEpochMs: Long,
+    val lastSeenAtEpochMs: Long,
+    val ordinarySeconds: Long,
+    val hostSeconds: Long,
+    val segmentCount: Int,
+)
+
+data class DeviceEventStoreResult(
+    val inserted: Boolean,
+    val accepted: Boolean,
+)
+
+@Serializable
 data class AuditView(
     val id: String,
     val accountId: String? = null,

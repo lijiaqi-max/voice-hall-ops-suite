@@ -10,6 +10,7 @@ import javax.sql.DataSource
 class OpsRepository(
     private val dataSource: DataSource,
     private val deviceCrypto: DeviceCrypto,
+    private val deviceEventProjector: DeviceEventProjector = DeviceEventProjector(),
 ) {
     fun bootstrap(
         organizationName: String,
@@ -1447,13 +1448,200 @@ class OpsRepository(
             device.copy(enabled = false)
         }
 
+    fun listMicSegments(
+        identity: RequestIdentity,
+        roomId: String?,
+        start: Long?,
+        end: Long?,
+    ): List<MicSegmentView> = dataSource.connection { connection ->
+        roomId?.let { requireRoomAccess(connection, identity, it) }
+        val conditions = mutableListOf("organization_id=?")
+        if (roomId != null) conditions += "room_id=?"
+        if (roomId == null && !hasGlobalRoomAccess(identity.role)) {
+            conditions += "room_id IN (SELECT room_id FROM account_room_scopes WHERE account_id=?)"
+        }
+        if (start != null) conditions += "COALESCE(ended_at,last_seen_at)>=?"
+        if (end != null) conditions += "started_at<?"
+        connection.prepareStatement(
+            """
+            SELECT id,room_id,shift_id,binding_id,wechat_name,ingkee_name,role,queue_position,
+                   started_at,last_seen_at,ended_at,duration_seconds,state,correction_reason
+            FROM mic_segments
+            WHERE ${conditions.joinToString(" AND ")}
+            ORDER BY started_at DESC
+            """.trimIndent(),
+        ).use {
+            var index = 1
+            it.setString(index++, identity.organizationId)
+            if (roomId != null) it.setString(index++, roomId)
+            if (roomId == null && !hasGlobalRoomAccess(identity.role)) {
+                it.setString(index++, identity.accountId)
+            }
+            if (start != null) it.setLong(index++, start)
+            if (end != null) it.setLong(index, end)
+            it.executeQuery().use { rows ->
+                rows.map {
+                    MicSegmentView(
+                        id = getString("id"),
+                        roomId = getString("room_id"),
+                        shiftId = getString("shift_id"),
+                        bindingId = getString("binding_id"),
+                        wechatName = getString("wechat_name"),
+                        ingkeeName = getString("ingkee_name"),
+                        role = getString("role"),
+                        queuePosition = getNullableInt("queue_position"),
+                        startedAtEpochMs = getLong("started_at"),
+                        lastSeenAtEpochMs = getLong("last_seen_at"),
+                        endedAtEpochMs = getNullableLong("ended_at"),
+                        durationSeconds = getLong("duration_seconds"),
+                        state = getString("state"),
+                        correctionReason = getString("correction_reason"),
+                    )
+                }
+            }
+        }
+    }
+
+    fun listQueueEntries(
+        identity: RequestIdentity,
+        roomId: String?,
+        shiftId: String?,
+    ): List<QueueEntryView> = dataSource.connection { connection ->
+        roomId?.let { requireRoomAccess(connection, identity, it) }
+        val conditions = mutableListOf("organization_id=?")
+        if (roomId != null) conditions += "room_id=?"
+        if (roomId == null && !hasGlobalRoomAccess(identity.role)) {
+            conditions += "room_id IN (SELECT room_id FROM account_room_scopes WHERE account_id=?)"
+        }
+        if (shiftId != null) conditions += "shift_id=?"
+        connection.prepareStatement(
+            """
+            SELECT id,room_id,shift_id,binding_id,wechat_name,role,position,state,updated_at
+            FROM queue_entries
+            WHERE ${conditions.joinToString(" AND ")}
+            ORDER BY shift_id,position
+            """.trimIndent(),
+        ).use {
+            var index = 1
+            it.setString(index++, identity.organizationId)
+            if (roomId != null) it.setString(index++, roomId)
+            if (roomId == null && !hasGlobalRoomAccess(identity.role)) {
+                it.setString(index++, identity.accountId)
+            }
+            if (shiftId != null) it.setString(index, shiftId)
+            it.executeQuery().use { rows ->
+                rows.map {
+                    QueueEntryView(
+                        id = getString("id"),
+                        roomId = getString("room_id"),
+                        shiftId = getString("shift_id"),
+                        bindingId = getString("binding_id"),
+                        wechatName = getString("wechat_name"),
+                        role = getString("role"),
+                        position = getInt("position"),
+                        state = getString("state"),
+                        updatedAtEpochMs = getLong("updated_at"),
+                    )
+                }
+            }
+        }
+    }
+
+    fun listBindings(identity: RequestIdentity, roomId: String?): List<BindingView> =
+        dataSource.connection { connection ->
+            roomId?.let { requireRoomAccess(connection, identity, it) }
+            val roomScope = if (roomId == null && !hasGlobalRoomAccess(identity.role)) {
+                "AND room_id IN (SELECT room_id FROM account_room_scopes WHERE account_id=?)"
+            } else {
+                ""
+            }
+            connection.prepareStatement(
+                """
+                SELECT id,room_id,external_binding_id,wechat_name,ingkee_name,state,
+                       approved_by_name,updated_at
+                FROM member_platform_bindings
+                WHERE organization_id=? ${if (roomId != null) "AND room_id=?" else ""} $roomScope
+                ORDER BY updated_at DESC
+                """.trimIndent(),
+            ).use {
+                var index = 1
+                it.setString(index++, identity.organizationId)
+                if (roomId != null) it.setString(index++, roomId)
+                if (roomId == null && !hasGlobalRoomAccess(identity.role)) {
+                    it.setString(index, identity.accountId)
+                }
+                it.executeQuery().use { rows ->
+                    rows.map {
+                        BindingView(
+                            id = getString("id"),
+                            roomId = getString("room_id"),
+                            externalBindingId = getString("external_binding_id"),
+                            wechatName = getString("wechat_name"),
+                            ingkeeName = getString("ingkee_name"),
+                            state = getString("state"),
+                            approvedBy = getString("approved_by_name"),
+                            updatedAtEpochMs = getLong("updated_at"),
+                        )
+                    }
+                }
+            }
+        }
+
+    fun listAttendance(
+        identity: RequestIdentity,
+        roomId: String?,
+        shiftId: String?,
+    ): List<AttendanceView> = dataSource.connection { connection ->
+        roomId?.let { requireRoomAccess(connection, identity, it) }
+        val conditions = mutableListOf("organization_id=?")
+        if (roomId != null) conditions += "room_id=?"
+        if (roomId == null && !hasGlobalRoomAccess(identity.role)) {
+            conditions += "room_id IN (SELECT room_id FROM account_room_scopes WHERE account_id=?)"
+        }
+        if (shiftId != null) conditions += "shift_id=?"
+        connection.prepareStatement(
+            """
+            SELECT id,room_id,shift_id,binding_id,wechat_name,ingkee_name,first_seen_at,last_seen_at,
+                   ordinary_seconds,host_seconds,segment_count
+            FROM attendance
+            WHERE ${conditions.joinToString(" AND ")}
+            ORDER BY last_seen_at DESC
+            """.trimIndent(),
+        ).use {
+            var index = 1
+            it.setString(index++, identity.organizationId)
+            if (roomId != null) it.setString(index++, roomId)
+            if (roomId == null && !hasGlobalRoomAccess(identity.role)) {
+                it.setString(index++, identity.accountId)
+            }
+            if (shiftId != null) it.setString(index, shiftId)
+            it.executeQuery().use { rows ->
+                rows.map {
+                    AttendanceView(
+                        id = getString("id"),
+                        roomId = getString("room_id"),
+                        shiftId = getString("shift_id"),
+                        bindingId = getString("binding_id"),
+                        wechatName = getString("wechat_name"),
+                        ingkeeName = getString("ingkee_name"),
+                        firstSeenAtEpochMs = getLong("first_seen_at"),
+                        lastSeenAtEpochMs = getLong("last_seen_at"),
+                        ordinarySeconds = getLong("ordinary_seconds"),
+                        hostSeconds = getLong("host_seconds"),
+                        segmentCount = getInt("segment_count"),
+                    )
+                }
+            }
+        }
+    }
+
     fun verifyAndStoreDeviceEvent(
         deviceId: String,
         timestamp: String,
         signature: String,
         rawBody: String,
         event: DeviceEventInput,
-    ): Boolean = dataSource.transaction { connection ->
+    ): DeviceEventStoreResult = dataSource.transaction { connection ->
         val timestampMs = timestamp.toLongOrNull() ?: error("设备时间戳无效")
         check(kotlin.math.abs(now() - timestampMs) <= 5 * 60_000L) { "设备请求已过期" }
         val device = connection.prepareStatement(
@@ -1485,10 +1673,73 @@ class OpsRepository(
             it.setLong(8, now())
             runCatching { it.executeUpdate() }.getOrElse { 0 }
         }
+        val storedState = connection.prepareStatement(
+            """
+            SELECT organization_id,room_id,device_id,processing_state
+            FROM device_events WHERE event_id=?
+            """.trimIndent(),
+        ).use {
+            it.setString(1, event.eventId)
+            it.executeQuery().use { rows ->
+                check(rows.next()) { "Stored device event could not be loaded" }
+                check(
+                    rows.getString("organization_id") == device.organizationId &&
+                        rows.getString("room_id") == device.roomId &&
+                        rows.getString("device_id") == deviceId,
+                ) { "Event ID belongs to another device or room" }
+                rows.getString("processing_state")
+            }
+        }
+        val accepted = if (storedState == "processed") {
+            true
+        } else {
+            val savepoint = connection.setSavepoint("before_device_projection")
+            runCatching {
+                deviceEventProjector.project(
+                    connection,
+                    device.organizationId,
+                    device.roomId,
+                    deviceId,
+                    event,
+                )
+            }.fold(
+                onSuccess = {
+                    connection.prepareStatement(
+                        """
+                        UPDATE device_events
+                        SET processing_state='processed',processed_at=?,processing_error=NULL
+                        WHERE event_id=?
+                        """.trimIndent(),
+                    ).use {
+                        it.setLong(1, now())
+                        it.setString(2, event.eventId)
+                        it.executeUpdate()
+                    }
+                    connection.releaseSavepoint(savepoint)
+                    true
+                },
+                onFailure = { error ->
+                    connection.rollback(savepoint)
+                    connection.prepareStatement(
+                        """
+                        UPDATE device_events
+                        SET processing_state='failed',processed_at=?,processing_error=?
+                        WHERE event_id=?
+                        """.trimIndent(),
+                    ).use {
+                        it.setLong(1, now())
+                        it.setString(2, (error.message ?: error::class.simpleName.orEmpty()).take(500))
+                        it.setString(3, event.eventId)
+                        it.executeUpdate()
+                    }
+                    false
+                },
+            )
+        }
         connection.prepareStatement("UPDATE devices SET last_seen_at=? WHERE id=?").use {
             it.setLong(1, now()); it.setString(2, deviceId); it.executeUpdate()
         }
-        inserted == 1
+        DeviceEventStoreResult(inserted == 1, accepted)
     }
 
     fun listAudit(identity: RequestIdentity, limit: Int): List<AuditView> =
@@ -1932,6 +2183,9 @@ private inline fun <T> ResultSet.map(block: ResultSet.() -> T): List<T> {
 
 private fun ResultSet.getNullableLong(column: String): Long? =
     getLong(column).let { if (wasNull()) null else it }
+
+private fun ResultSet.getNullableInt(column: String): Int? =
+    getInt(column).let { if (wasNull()) null else it }
 
 private fun java.sql.PreparedStatement.setNullableString(index: Int, value: String?) {
     if (value == null) setNull(index, java.sql.Types.VARCHAR) else setString(index, value)

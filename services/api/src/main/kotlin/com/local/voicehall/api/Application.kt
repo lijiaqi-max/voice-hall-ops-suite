@@ -206,14 +206,17 @@ fun Application.module(
             val signature = call.request.headers["X-Signature"].orEmpty()
             val rawBody = call.receiveText()
             val event = jsonCodec.decodeFromString<DeviceEventInput>(rawBody)
-            val inserted = repository.verifyAndStoreDeviceEvent(
+            val result = repository.verifyAndStoreDeviceEvent(
                 deviceId,
                 timestamp,
                 signature,
                 rawBody,
                 event,
             )
-            call.respond(if (inserted) HttpStatusCode.Accepted else HttpStatusCode.OK, DeviceAck(event.eventId, inserted))
+            call.respond(
+                if (result.inserted) HttpStatusCode.Accepted else HttpStatusCode.OK,
+                DeviceAck(event.eventId, result.accepted),
+            )
         }
 
         webSocket("/devices/ws") {
@@ -222,14 +225,14 @@ fun Application.module(
                 if (frame !is Frame.Text) continue
                 val envelope = jsonCodec.decodeFromString<DeviceWsEnvelope>(frame.readText())
                 val body = jsonCodec.encodeToString(envelope.event)
-                val inserted = repository.verifyAndStoreDeviceEvent(
+                val result = repository.verifyAndStoreDeviceEvent(
                     deviceId,
                     envelope.timestamp,
                     envelope.signature,
                     body,
                     envelope.event,
                 )
-                send(jsonCodec.encodeToString(DeviceAck(envelope.event.eventId, inserted)))
+                send(jsonCodec.encodeToString(DeviceAck(envelope.event.eventId, result.accepted)))
             }
         }
 
@@ -271,6 +274,41 @@ fun Application.module(
                     call.requirePermission("shifts.write")
                     call.respond(HttpStatusCode.Created, repository.createShift(call.identity(), call.receive()))
                 }
+            }
+            get("/mic-segments") {
+                call.requirePermission("mic.read")
+                call.respond(
+                    repository.listMicSegments(
+                        call.identity(),
+                        call.request.queryParameters["roomId"],
+                        call.request.queryParameters["start"]?.toLongOrNull(),
+                        call.request.queryParameters["end"]?.toLongOrNull(),
+                    ),
+                )
+            }
+            get("/queue-entries") {
+                call.requirePermission("mic.read")
+                call.respond(
+                    repository.listQueueEntries(
+                        call.identity(),
+                        call.request.queryParameters["roomId"],
+                        call.request.queryParameters["shiftId"],
+                    ),
+                )
+            }
+            get("/bindings") {
+                call.requirePermission("mic.read")
+                call.respond(repository.listBindings(call.identity(), call.request.queryParameters["roomId"]))
+            }
+            get("/attendance") {
+                call.requirePermission("mic.read")
+                call.respond(
+                    repository.listAttendance(
+                        call.identity(),
+                        call.request.queryParameters["roomId"],
+                        call.request.queryParameters["shiftId"],
+                    ),
+                )
             }
             route("/customers") {
                 get {
