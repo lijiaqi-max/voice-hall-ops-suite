@@ -74,7 +74,7 @@ class OpsRepository(
                 it.setString(3, "默认结算规则")
                 it.setLong(4, 0)
                 it.setInt(5, 5000)
-                it.setInt(6, 10000)
+                it.setInt(6, 1000)
                 it.setInt(7, 3000)
                 it.setLong(8, now)
                 it.executeUpdate()

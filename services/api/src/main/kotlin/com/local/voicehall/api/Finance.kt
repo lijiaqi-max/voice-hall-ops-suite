@@ -32,9 +32,10 @@ object FinanceCalculator {
         val platform = multiplyBps(input.grossCents, input.platformRateBps)
         val afterPlatform = input.grossCents - platform
         val organizationShare = multiplyBps(afterPlatform, input.organizationShareBps)
-        val memberCommission = multiplyBps(organizationShare, input.memberCommissionBps)
+        val accountsReceivable = exactSubtract(afterPlatform, organizationShare)
+        val memberCommission = multiplyBps(accountsReceivable, input.memberCommissionBps)
         val payable = exactSum(memberCommission, input.hostCostCents, input.expenseCents)
-        val netProfit = exactSubtract(organizationShare, payable)
+        val netProfit = exactSubtract(accountsReceivable, payable)
         return SettlementView(
             roomId = roomId,
             periodStartEpochMs = periodStart,
@@ -46,13 +47,13 @@ object FinanceCalculator {
             memberCommissionCents = memberCommission,
             hostCostCents = input.hostCostCents,
             expenseCents = input.expenseCents,
-            accountsReceivableCents = organizationShare,
+            accountsReceivableCents = accountsReceivable,
             accountsPayableCents = payable,
             netProfitCents = netProfit,
             hostCostEstimated = hostCostEstimated,
             hostCostOverrideReason = hostCostOverrideReason,
             unallocatedRevenueCents = unallocatedRevenueCents,
-            reconciliationDifferenceCents = exactSubtract(organizationShare, payable, netProfit),
+            reconciliationDifferenceCents = exactSubtract(accountsReceivable, payable, netProfit),
             state = "preview",
         )
     }

@@ -24,9 +24,11 @@ class FinanceCalculatorTest {
         )
         assertEquals(50_000, result.platformDeductionCents)
         assertEquals(40_000, result.organizationShareCents)
-        assertEquals(12_000, result.memberCommissionCents)
-        assertEquals(19_000, result.accountsPayableCents)
-        assertEquals(21_000, result.netProfitCents)
+        assertEquals(3_000, result.memberCommissionCents)
+        assertEquals(10_000, result.accountsReceivableCents)
+        assertEquals(10_000, result.accountsPayableCents)
+        assertEquals(0, result.netProfitCents)
+        assertEquals(0, result.reconciliationDifferenceCents)
     }
 
     @Test
@@ -51,6 +53,37 @@ class FinanceCalculatorTest {
     fun proratesHostCostUsingIntegerDuration() {
         assertEquals(3_333, FinanceCalculator.prorate(10_000, 1_200_000, 3_600_000))
         assertEquals(5_000, FinanceCalculator.prorate(10_000, 1_800_000, 3_600_000))
+    }
+
+    @Test
+    fun reconcilesRandomOperatingStatementsWithoutFloatingPoint() {
+        val random = Random(84)
+        repeat(2_000) {
+            val result = FinanceCalculator.calculate(
+                FinanceInputs(
+                    grossCents = random.nextLong(0, 10_000_000_000L),
+                    platformRateBps = random.nextInt(0, 10_001),
+                    organizationShareBps = random.nextInt(0, 10_001),
+                    memberCommissionBps = random.nextInt(0, 10_001),
+                    hostCostCents = random.nextLong(0, 1_000_000L),
+                    expenseCents = random.nextLong(0, 1_000_000L),
+                ),
+                roomId = null,
+                periodStart = 1,
+                periodEnd = 2,
+                ruleId = "property-test",
+            )
+            assertEquals(
+                result.grossCents -
+                    result.platformDeductionCents -
+                    result.organizationShareCents -
+                    result.memberCommissionCents -
+                    result.hostCostCents -
+                    result.expenseCents,
+                result.netProfitCents,
+            )
+            assertEquals(0, result.reconciliationDifferenceCents)
+        }
     }
 
     @Test
