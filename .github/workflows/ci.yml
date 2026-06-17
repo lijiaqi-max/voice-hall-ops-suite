@@ -15,7 +15,7 @@ jobs:
           java-version: "21"
       - uses: pnpm/action-setup@v4
         with:
-          version: "10"
+          version: "11.5.0"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -47,8 +47,29 @@ jobs:
       - uses: android-actions/setup-android@v3
       - name: Install Android SDK
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
-      - name: Test and build debug APK
+      - name: Test, lint, compile instrumentation and build debug APK
         working-directory: apps/${{ matrix.app }}
         run: |
           chmod +x gradlew
-          ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-daemon
+          ./gradlew :app:testDebugUnitTest :app:lintRelease :app:compileDebugAndroidTestKotlin :app:assembleDebug --no-daemon
+      - name: Check Android permission boundary
+        working-directory: apps/${{ matrix.app }}
+        run: |
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump permissions app/build/outputs/apk/debug/app-debug.apk | tee permissions.txt
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump xmltree app/build/outputs/apk/debug/app-debug.apk AndroidManifest.xml | tee manifest.txt
+          if [ "${{ matrix.app }}" = "member-android" ] && grep "BIND_ACCESSIBILITY_SERVICE" manifest.txt; then
+            echo "member app must not declare an accessibility service"
+            exit 1
+          fi
+          if [ "${{ matrix.app }}" = "control-android" ] && ! grep "BIND_ACCESSIBILITY_SERVICE" manifest.txt; then
+            echo "control app must declare the accessibility service"
+            exit 1
+          fi
+
+  source-package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate source package whitelist
+        shell: pwsh
+        run: .\scripts\package-source.ps1
