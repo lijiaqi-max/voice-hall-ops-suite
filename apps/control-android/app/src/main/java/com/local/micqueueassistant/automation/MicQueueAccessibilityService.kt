@@ -47,23 +47,28 @@ class MicQueueAccessibilityService : AccessibilityService() {
 
     private suspend fun handleRobot(packageName: String) {
         if (packageName !in setOf(WechatGroupAdapterImpl.OFFICIAL_PACKAGE, WechatGroupAdapterImpl.MOCK_PACKAGE)) return
-        val status = wechatAdapter.inspect(this)
+        val config = repository.config.value
+        val officialEnabled = config.wechatServerCapabilityEnabled &&
+            config.wechatOfficialReplyEnabled &&
+            config.robotAutoReplyEnabled &&
+            config.wechatCalibrationStatus == "已校准"
+        val status = wechatAdapter.inspect(this, officialEnabled)
         AutomationCoordinator.updateStatus(status.reason, status.pageType)
         if (!status.supported) return
         wechatAdapter.captureIncomingMessages(this).forEach { message ->
             val response = repository.processIncomingMessage(message).getOrElse {
                 it.message ?: "指令处理失败"
             } ?: return@forEach
-            val config = repository.config.value
-            val maySend = status.calibrated ||
-                (config.robotAutoReplyEnabled && config.wechatCalibrationStatus == "已校准")
-            if (!maySend) {
+            if (!status.calibrated) {
+                repository.nextPendingReply()?.let { pending ->
+                    repository.updateReplyState(pending.id, "failed", failureReason = "正式微信能力未启用")
+                }
                 AutomationCoordinator.updateLastReply("待发送：$response")
                 return@forEach
             }
             val reply = repository.nextPendingReply() ?: return@forEach
             repository.updateReplyState(reply.id, "sending", incrementAttempt = true)
-            wechatAdapter.sendReply(this, response)
+            wechatAdapter.sendReply(this, response, officialEnabled)
                 .onSuccess {
                     repository.updateReplyState(reply.id, "sent")
                     AutomationCoordinator.updateLastReply(response)
@@ -78,9 +83,17 @@ class MicQueueAccessibilityService : AccessibilityService() {
 
     private suspend fun handleCollector(packageName: String) {
         if (packageName !in setOf(IngkeeVoiceRoom9860Adapter.OFFICIAL_PACKAGE, IngkeeVoiceRoom9860Adapter.MOCK_PACKAGE)) return
-        val status = ingkeeAdapter.inspect(this)
+        val config = repository.config.value
+        val officialEnabled = config.ingkeeServerCapabilityEnabled &&
+            config.ingkeeOfficialCaptureEnabled &&
+            config.ingkeeCalibrationStatus == "已校准"
+        val status = ingkeeAdapter.inspect(this, officialEnabled)
         AutomationCoordinator.updateStatus(status.reason, status.pageType)
-        val payload = ingkeeAdapter.captureSeatSnapshot(this)
+        if (!status.calibrated) {
+            AutomationCoordinator.updateSeats(emptyList())
+            return
+        }
+        val payload = ingkeeAdapter.captureSeatSnapshot(this, officialEnabled)
         AutomationCoordinator.updateSeats(
             payload.seats.sortedBy { it.seatIndex }.map { "${it.seatIndex}. ${it.ingkeeName}" },
         )

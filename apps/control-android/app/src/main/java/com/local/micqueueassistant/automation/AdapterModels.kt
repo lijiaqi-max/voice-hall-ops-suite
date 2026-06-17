@@ -14,12 +14,19 @@ data class AdapterStatus(
 )
 
 interface WechatGroupAdapter {
-    fun inspect(service: AccessibilityService): AdapterStatus
+    fun inspect(service: AccessibilityService, officialEnabled: Boolean = false): AdapterStatus
     suspend fun captureIncomingMessages(service: AccessibilityService): List<IncomingGroupMessage>
-    suspend fun sendReply(service: AccessibilityService, message: String): Result<Unit>
+    suspend fun sendReply(
+        service: AccessibilityService,
+        message: String,
+        officialEnabled: Boolean = false,
+    ): Result<Unit>
 }
 
 interface IngkeeVoiceRoomAdapter {
-    fun inspect(service: AccessibilityService): AdapterStatus
-    suspend fun captureSeatSnapshot(service: AccessibilityService): SeatSnapshotPayload
+    fun inspect(service: AccessibilityService, officialEnabled: Boolean = false): AdapterStatus
+    suspend fun captureSeatSnapshot(
+        service: AccessibilityService,
+        officialEnabled: Boolean = false,
+    ): SeatSnapshotPayload
 }

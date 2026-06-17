@@ -8,7 +8,7 @@ import java.nio.charset.StandardCharsets
 import java.util.UUID
 
 class IngkeeVoiceRoom9860Adapter : IngkeeVoiceRoomAdapter {
-    override fun inspect(service: AccessibilityService): AdapterStatus {
+    override fun inspect(service: AccessibilityService, officialEnabled: Boolean): AdapterStatus {
         val root = service.rootInActiveWindow
             ?: return AdapterStatus(false, null, null, "unreadable", false, "当前窗口不可读取")
         val packageName = root.packageName?.toString()
@@ -36,15 +36,17 @@ class IngkeeVoiceRoom9860Adapter : IngkeeVoiceRoomAdapter {
             "unknown"
         }
         val mock = packageName == MOCK_PACKAGE
+        val calibrated = mock || officialEnabled
         return AdapterStatus(
             supported = page == "voice_room",
             packageName = packageName,
             versionName = version,
             pageType = page,
-            calibrated = mock,
+            calibrated = calibrated && page == "voice_room",
             reason = when {
                 page != "voice_room" -> "未知映客页面，已停止计时"
                 mock -> "模拟映客麦位已校准"
+                officialEnabled -> "正式映客麦位识别已校准"
                 else -> "映客麦位识别待校准"
             },
         )
@@ -52,8 +54,9 @@ class IngkeeVoiceRoom9860Adapter : IngkeeVoiceRoomAdapter {
 
     override suspend fun captureSeatSnapshot(
         service: AccessibilityService,
+        officialEnabled: Boolean,
     ): SeatSnapshotPayload {
-        val status = inspect(service)
+        val status = inspect(service, officialEnabled)
         val now = System.currentTimeMillis()
         if (!status.supported || !status.calibrated) {
             return payload(emptyList(), status.pageType, status.reason, now)

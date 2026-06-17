@@ -9,12 +9,28 @@ import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 
 class WechatGroupAdapterImpl : WechatGroupAdapter {
-    override fun inspect(service: AccessibilityService): AdapterStatus {
+    override fun inspect(service: AccessibilityService, officialEnabled: Boolean): AdapterStatus {
         val root = service.rootInActiveWindow
             ?: return AdapterStatus(false, null, null, "unreadable", false, "当前窗口不可读取")
         val packageName = root.packageName?.toString()
         if (packageName !in setOf(OFFICIAL_PACKAGE, MOCK_PACKAGE)) {
             return AdapterStatus(false, packageName, null, "unsupported", false, "当前不是微信或模拟应用")
+        }
+        val mock = packageName == MOCK_PACKAGE
+        val versionName = if (mock) {
+            MOCK_VERSION
+        } else {
+            service.packageManager.getPackageInfo(OFFICIAL_PACKAGE, 0).versionName
+        }
+        if (!mock && versionName != SUPPORTED_WECHAT_VERSION) {
+            return AdapterStatus(
+                supported = false,
+                packageName = packageName,
+                versionName = versionName,
+                pageType = "version_mismatch",
+                calibrated = false,
+                reason = "微信版本 $versionName 未校准，目标版本 $SUPPORTED_WECHAT_VERSION",
+            )
         }
         val texts = root.walk().map { it.semanticText() }.filter(String::isNotBlank).toList()
         val page = if (
@@ -25,16 +41,17 @@ class WechatGroupAdapterImpl : WechatGroupAdapter {
         } else {
             "unknown"
         }
-        val mock = packageName == MOCK_PACKAGE
+        val calibrated = mock || officialEnabled
         return AdapterStatus(
             supported = page == "group_chat",
             packageName = packageName,
-            versionName = if (mock) MOCK_VERSION else null,
+            versionName = versionName,
             pageType = page,
-            calibrated = mock,
+            calibrated = calibrated && page == "group_chat",
             reason = when {
                 page != "group_chat" -> "未知微信页面，已停止"
                 mock -> "模拟微信群已校准"
+                officialEnabled -> "正式微信自动回复已校准"
                 else -> "微信自动回复待校准"
             },
         )
@@ -84,8 +101,9 @@ class WechatGroupAdapterImpl : WechatGroupAdapter {
     override suspend fun sendReply(
         service: AccessibilityService,
         message: String,
+        officialEnabled: Boolean,
     ): Result<Unit> = runCatching {
-        val status = inspect(service)
+        val status = inspect(service, officialEnabled)
         check(status.supported) { status.reason }
         check(status.calibrated) { "微信自动回复待校准，正式微信不执行发送" }
         val root = service.rootInActiveWindow ?: error("群聊窗口不可读取")
@@ -120,6 +138,7 @@ class WechatGroupAdapterImpl : WechatGroupAdapter {
         const val OFFICIAL_PACKAGE = "com.tencent.mm"
         const val MOCK_PACKAGE = "com.local.micqueueassistant.mocktarget"
         const val MOCK_VERSION = "9.8.60"
+        const val SUPPORTED_WECHAT_VERSION = "8.0.74"
         const val BOT_NAME = "麦序统计机器人"
         private val MOCK_MESSAGE_PATTERN =
             Regex("""群消息\|发送者:(.+?)\|内容:(.+?)\|时间:(\d+)""")
