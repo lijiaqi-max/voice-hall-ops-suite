@@ -15,7 +15,7 @@
 - 财务金额只采用官方 CSV/XLSX 账单，数据库使用人民币“分”的整数。
 - 高价值等级只表示已确认流水层级，不推断真实财富能力。
 - 成员端不申请无障碍权限，不自动私信、群发或诱导消费。
-- 厅控端是唯一申请无障碍权限的 APK；正式微信和映客适配器在真机校准前保持关闭。
+- 厅控端是唯一申请无障碍权限的 APK；正式微信和映客适配器在真机校准前保持关闭，启用必须同时通过管理台设备能力和 Android 本机能力门禁。
 - 不使用平台私有接口，不处理登录、验证码或安全验证。
 
 ## 本地构建
@@ -44,6 +44,6 @@ cd D:\int\voice-hall-ops-suite
 2. 将域名解析到 VPS，并开放 TCP `80/443` 与 UDP `443`。
 3. 在 `infra` 目录执行 `docker compose --env-file .env up -d --build`。
 4. 打开 `https://你的域名`，使用启动账号登录后立即创建日常管理员、财务和成员账号。
-5. 在管理台创建厅房，再为厅控端生成设备注册信息。
+5. 在管理台创建厅房，再为厅控端生成 10 分钟一次性设备注册令牌。Android 厅控端只输入 `HTTPS API 地址 + 设备名 + 注册令牌`，不粘贴管理员访问令牌。
 
-详见 [安装手册](docs/INSTALL.md)、[架构说明](docs/ARCHITECTURE.md)、[权限说明](docs/PERMISSIONS.md) 和 [验收记录](docs/VALIDATION.md)。
+详见 [项目接管分析](docs/PROJECT_TAKEOVER_ANALYSIS.md)、[生产上线运行手册](docs/PRODUCTION_RUNBOOK.md)、[安装手册](docs/INSTALL.md)、[架构说明](docs/ARCHITECTURE.md)、[权限说明](docs/PERMISSIONS.md) 和 [验收记录](docs/VALIDATION.md)。

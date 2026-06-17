@@ -64,13 +64,26 @@ ID 幂等处理。
 设备管理接口：
 
 - `GET /devices`
-- `POST /devices/register`
+- `POST /devices/registration-tokens`
+- `POST /devices/bootstrap`
+- `POST /devices/config`
+- `POST /devices/register`（兼容旧测试接口，生产不要给 Android 使用管理员 JWT）
+- `POST /devices/{id}/calibration`
 - `POST /devices/{id}/disable`
 - `POST /devices/events`
 - `GET /mic-segments`
 - `GET /queue-entries`
 - `GET /bindings`
 - `GET /attendance`
+
+生产设备注册流程：
+
+1. 管理员在管理台选择厅房和设备角色，调用 `POST /devices/registration-tokens`。
+2. 服务端返回 10 分钟有效、一次性显示的注册令牌，只保存令牌 SHA-256。
+3. Android 厅控端提交 `HTTPS API 地址 + 设备名 + 注册令牌` 到 `POST /devices/bootstrap`。
+4. bootstrap 成功后返回 `deviceId`、`deviceSecret`、`roomId` 和设备角色；令牌立即标记已用。
+5. 管理台完成真机校准记录后，调用 `POST /devices/{id}/calibration` 启用 `wechat_group_reply` 或 `ingkee_voice_room_capture`。
+6. Android 通过设备密钥签名调用 `POST /devices/config` 拉取服务端能力；本机也必须在设置页手动启用对应正式能力，否则正式微信/映客不会发送或计时。
 
 厅控设备事件不使用成员 JWT。设备注册后使用：
 
@@ -90,6 +103,8 @@ ID 幂等处理。
 `accepted=false`，设备保留事件并在重连后使用同一 `eventId` 重放；投影成功后
 再次重放只返回已有结果，不重复生成麦时或队列。设备被禁用后，新的签名事件会
 被拒绝。
+
+正式微信/映客自动化必须同时满足：设备未禁用、角色和能力匹配、管理台能力已启用、Android 本机能力已启用、目标 App 包名和版本匹配、当前页面特征可验证。未知页面、版本不符或节点不足时停止，不允许固定坐标兜底。
 
 `seat_snapshot.pageStatus` 只有 `voice_room` 才参与计时。昵称短暂消失不足
 10 秒不会拆段；页面不可读时立即在最后一次可信时间关闭为 `uncertain`，不推算
