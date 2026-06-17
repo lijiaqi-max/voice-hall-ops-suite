@@ -89,8 +89,23 @@ export type Device = {
   id: string;
   roomId: string;
   name: string;
+  role: string;
   enabled: boolean;
+  wechatGroupReplyEnabled: boolean;
+  ingkeeVoiceRoomCaptureEnabled: boolean;
+  wechatCalibrationStatus: string;
+  ingkeeCalibrationStatus: string;
+  calibratedAtEpochMs?: number;
+  calibrationSummary?: string;
   lastSeenAtEpochMs?: number;
+};
+
+export type DeviceRegistrationToken = {
+  id: string;
+  roomId: string;
+  role: string;
+  token: string;
+  expiresAtEpochMs: number;
 };
 
 export type MicSegment = {

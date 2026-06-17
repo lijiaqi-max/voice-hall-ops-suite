@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import type { Attendance, Binding, Device, MicSegment, QueueEntry, Room } from "../../types";
+import type {
+  Attendance,
+  Binding,
+  Device,
+  DeviceRegistrationToken,
+  MicSegment,
+  QueueEntry,
+  Room,
+} from "../../types";
 import { localTime } from "../../utils";
 import { Card, Stat, Table } from "../ui";
 import type { ApiCall } from "./types";
@@ -26,6 +34,9 @@ export function ControlPage({
   const [queue, setQueue] = useState<QueueEntry[]>([]);
   const [bindings, setBindings] = useState<Binding[]>([]);
   const [attendance, setAttendance] = useState<Attendance[]>([]);
+  const [tokenRoomId, setTokenRoomId] = useState("");
+  const [tokenRole, setTokenRole] = useState("robot");
+  const [registrationToken, setRegistrationToken] = useState<DeviceRegistrationToken | null>(null);
 
   const load = useCallback(async () => {
     const suffix = roomId ? `?roomId=${roomId}` : "";
@@ -49,6 +60,36 @@ export function ControlPage({
     .reduce((sum, item) => sum + item.durationSeconds, 0);
   const uncertain = segments.filter((item) => item.state === "uncertain").length;
   const roomName = (id: string) => rooms.find((room) => room.id === id)?.name || id.slice(0, 8);
+  const capabilityLabel = (device: Device) => device.role === "robot"
+    ? `微信回复：${device.wechatGroupReplyEnabled ? "已启用" : "关闭"} / ${device.wechatCalibrationStatus}`
+    : `映客采集：${device.ingkeeVoiceRoomCaptureEnabled ? "已启用" : "关闭"} / ${device.ingkeeCalibrationStatus}`;
+  const createRegistrationToken = async () => {
+    const created = await call<DeviceRegistrationToken>("/devices/registration-tokens", {
+      method: "POST",
+      body: JSON.stringify({
+        roomId: tokenRoomId || roomId || rooms[0]?.id,
+        role: tokenRole,
+        ttlSeconds: 600,
+      }),
+    });
+    setRegistrationToken(created);
+    await load();
+  };
+  const updateCalibration = async (device: Device, enabled: boolean) => {
+    const capability = device.role === "robot" ? "wechat_group_reply" : "ingkee_voice_room_capture";
+    const summary = enabled
+      ? "管理台确认真机包名、版本、页面特征、目标群/语音房节点和端到端验收通过"
+      : "管理台关闭正式自动化能力";
+    await call<Device>(`/devices/${device.id}/calibration`, {
+      method: "POST",
+      body: JSON.stringify({ capability, enabled, status: enabled ? "已校准" : "已关闭", summary }),
+    });
+    await load();
+  };
+  const disableDevice = async (device: Device) => {
+    await call<Device>(`/devices/${device.id}/disable`, { method: "POST" });
+    await load();
+  };
 
   return <>
     <div className="stats-grid">
@@ -70,12 +111,40 @@ export function ControlPage({
     </Card>
     <div className="two-col">
       <Card title="设备状态">
-        <Table headers={["设备", "厅房", "状态", "最后在线"]} empty={!devices.length}>
+        {canManageDevices && <div className="form-grid">
+          <label>注册厅房
+            <select value={tokenRoomId} onChange={(event) => setTokenRoomId(event.target.value)}>
+              <option value="">使用当前/第一个厅房</option>
+              {rooms.map((room) => <option value={room.id} key={room.id}>{room.name}</option>)}
+            </select>
+          </label>
+          <label>设备角色
+            <select value={tokenRole} onChange={(event) => setTokenRole(event.target.value)}>
+              <option value="robot">微信机器人端</option>
+              <option value="collector">映客采集端</option>
+            </select>
+          </label>
+          <button onClick={() => createRegistrationToken()}>生成 10 分钟一次性令牌</button>
+        </div>}
+        {registrationToken && <p className="upload-zone">
+          一次性注册令牌：<strong>{registrationToken.token}</strong><br />
+          仅显示一次，{localTime(registrationToken.expiresAtEpochMs)} 过期。请在厅控 APK 输入中台 HTTPS 地址、设备名和该令牌。
+        </p>}
+        <Table headers={["设备", "厅房", "角色", "状态", "能力/校准", "最后在线", "操作"]} empty={!devices.length}>
           {devices.map((device) => <tr key={device.id}>
             <td>{device.name}</td>
             <td>{roomName(device.roomId)}</td>
+            <td>{device.role === "robot" ? "微信机器人端" : "映客采集端"}</td>
             <td><span className="state">{device.enabled ? "启用" : "已禁用"}</span></td>
+            <td>{capabilityLabel(device)}<small className="subline">{device.calibrationSummary || "正式能力默认关闭，真机校准后再启用"}</small></td>
             <td>{localTime(device.lastSeenAtEpochMs)}</td>
+            <td className="actions">
+              {canManageDevices && device.enabled && <>
+                <button onClick={() => updateCalibration(device, true)}>启用能力</button>
+                <button onClick={() => updateCalibration(device, false)}>关闭能力</button>
+                <button onClick={() => disableDevice(device)}>禁用设备</button>
+              </>}
+            </td>
           </tr>)}
         </Table>
       </Card>
