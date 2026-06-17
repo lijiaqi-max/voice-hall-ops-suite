@@ -20,10 +20,31 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 @Serializable
-private data class DeviceRegistrationInput(val roomId: String, val name: String)
+private data class DeviceBootstrapInput(val registrationToken: String, val deviceName: String)
 
 @Serializable
-private data class DeviceRegistrationResponse(val deviceId: String, val deviceSecret: String)
+private data class DeviceRegistrationResponse(
+    val deviceId: String,
+    val deviceSecret: String,
+    val roomId: String,
+    val role: String,
+    val wechatGroupReplyEnabled: Boolean = false,
+    val ingkeeVoiceRoomCaptureEnabled: Boolean = false,
+    val wechatCalibrationStatus: String = "待校准",
+    val ingkeeCalibrationStatus: String = "待校准",
+)
+
+@Serializable
+private data class DeviceConfigResponse(
+    val deviceId: String,
+    val roomId: String,
+    val role: String,
+    val enabled: Boolean,
+    val wechatGroupReplyEnabled: Boolean,
+    val ingkeeVoiceRoomCaptureEnabled: Boolean,
+    val wechatCalibrationStatus: String,
+    val ingkeeCalibrationStatus: String,
+)
 
 @Serializable
 private data class CloudDeviceEvent(
@@ -88,26 +109,33 @@ object PairingTransportManager {
     suspend fun enroll(
         context: Context,
         baseUrl: String,
-        roomId: String,
-        adminAccessToken: String,
+        registrationToken: String,
         deviceName: String,
     ): Result<String> = runCatching {
         val normalized = baseUrl.trim().trimEnd('/')
         require(normalized.startsWith("https://")) { "正式环境必须使用 HTTPS 地址" }
-        require(roomId.isNotBlank()) { "厅房 ID 不能为空" }
-        require(adminAccessToken.isNotBlank()) { "设备注册令牌不能为空" }
+        require(registrationToken.isNotBlank()) { "设备注册令牌不能为空" }
+        require(deviceName.trim().length in 2..80) { "设备名称长度必须为 2–80" }
         val responseText = http(
-            url = "$normalized/devices/register",
+            url = "$normalized/devices/bootstrap",
             method = "POST",
-            body = json.encodeToString(DeviceRegistrationInput(roomId.trim(), deviceName.trim())),
-            headers = mapOf("Authorization" to "Bearer ${adminAccessToken.trim()}"),
+            body = json.encodeToString(DeviceBootstrapInput(registrationToken.trim(), deviceName.trim())),
         )
         val registration = json.decodeFromString<DeviceRegistrationResponse>(responseText)
+        val localRole = MicQueueApp.instance.repository.config.value.role
+        check(localRole == registration.role) {
+            "注册令牌角色为 ${registration.role}，当前手机角色为 $localRole，请切换角色后重新注册"
+        }
         CloudSecretStore.save(context.applicationContext, registration.deviceSecret)
         MicQueueApp.instance.repository.saveCloudRegistration(
             normalized,
-            roomId.trim(),
+            registration.roomId,
             registration.deviceId,
+            registration.role,
+            registration.wechatGroupReplyEnabled,
+            registration.ingkeeVoiceRoomCaptureEnabled,
+            registration.wechatCalibrationStatus,
+            registration.ingkeeCalibrationStatus,
         ).getOrThrow()
         _state.value = "registered"
         _detail.value = "设备注册完成，请启动同步服务"
@@ -133,12 +161,14 @@ object PairingTransportManager {
 
     private suspend fun flushPending(context: Context) {
         val repository = MicQueueApp.instance.repository
-        val config = repository.config.value
+        var config = repository.config.value
         val secret = CloudSecretStore.load(context) ?: error("设备密钥不存在")
         require(config.cloudBaseUrl.startsWith("https://")) { "私有云地址不是 HTTPS" }
         require(config.cloudRoomId.isNotBlank() && config.cloudDeviceId.isNotBlank()) {
             "设备尚未注册"
         }
+        refreshDeviceConfig(secret, config)
+        config = repository.config.value
         repository.pendingCollectorEvents()
             .sortedWith(compareBy({ eventPriority(it.type) }, { it.createdAtEpochMs }, { it.id }))
             .forEach { row ->
@@ -171,6 +201,31 @@ object PairingTransportManager {
         repository.setForegroundServiceEnabled(true)
     }
 
+    private suspend fun refreshDeviceConfig(secret: String, config: com.local.micqueueassistant.data.AppConfigEntity) {
+        val body = "{}"
+        val timestamp = System.currentTimeMillis().toString()
+        val response = http(
+            url = "${config.cloudBaseUrl}/devices/config",
+            method = "POST",
+            body = body,
+            headers = mapOf(
+                "X-Device-Id" to config.cloudDeviceId,
+                "X-Timestamp" to timestamp,
+                "X-Signature" to hmac(secret, "$timestamp\n$body"),
+            ),
+        )
+        val deviceConfig = json.decodeFromString<DeviceConfigResponse>(response)
+        check(deviceConfig.enabled) { "云端设备已禁用" }
+        MicQueueApp.instance.repository.updateCloudCapabilities(
+            roomId = deviceConfig.roomId,
+            deviceRole = deviceConfig.role,
+            wechatServerCapabilityEnabled = deviceConfig.wechatGroupReplyEnabled,
+            ingkeeServerCapabilityEnabled = deviceConfig.ingkeeVoiceRoomCaptureEnabled,
+            wechatCalibrationStatus = deviceConfig.wechatCalibrationStatus,
+            ingkeeCalibrationStatus = deviceConfig.ingkeeCalibrationStatus,
+        )
+    }
+
     private fun eventPriority(type: String): Int = when (type) {
         "shift_upsert" -> 0
         "binding_upsert" -> 1
@@ -190,7 +245,7 @@ object PairingTransportManager {
         url: String,
         method: String,
         body: String,
-        headers: Map<String, String>,
+        headers: Map<String, String> = emptyMap(),
     ): String = withContext(Dispatchers.IO) {
         val connection = URL(url).openConnection() as HttpURLConnection
         try {

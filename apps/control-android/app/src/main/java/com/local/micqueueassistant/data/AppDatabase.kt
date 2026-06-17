@@ -34,6 +34,11 @@ data class AppConfigEntity(
     val cloudBaseUrl: String = "",
     val cloudRoomId: String = "",
     val cloudDeviceId: String = "",
+    val cloudDeviceRole: String = "",
+    val wechatServerCapabilityEnabled: Boolean = false,
+    val ingkeeServerCapabilityEnabled: Boolean = false,
+    val wechatOfficialReplyEnabled: Boolean = false,
+    val ingkeeOfficialCaptureEnabled: Boolean = false,
     val cloudLastSyncAtEpochMs: Long? = null,
     val cloudSyncEnabled: Boolean = false,
 )
@@ -543,7 +548,7 @@ interface AppDao {
         ExportTaskEntity::class,
         AuditLogEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -556,7 +561,7 @@ abstract class AppDatabase : RoomDatabase() {
                 AppDatabase::class.java,
                 "mic-queue-assistant.db",
             )
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
 
         internal val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -567,6 +572,24 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE app_config ADD COLUMN cloudLastSyncAtEpochMs INTEGER")
                 db.execSQL(
                     "ALTER TABLE app_config ADD COLUMN cloudSyncEnabled INTEGER NOT NULL DEFAULT 0",
+                )
+            }
+        }
+
+        internal val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE app_config ADD COLUMN cloudDeviceRole TEXT NOT NULL DEFAULT ''")
+                db.execSQL(
+                    "ALTER TABLE app_config ADD COLUMN wechatServerCapabilityEnabled INTEGER NOT NULL DEFAULT 0",
+                )
+                db.execSQL(
+                    "ALTER TABLE app_config ADD COLUMN ingkeeServerCapabilityEnabled INTEGER NOT NULL DEFAULT 0",
+                )
+                db.execSQL(
+                    "ALTER TABLE app_config ADD COLUMN wechatOfficialReplyEnabled INTEGER NOT NULL DEFAULT 0",
+                )
+                db.execSQL(
+                    "ALTER TABLE app_config ADD COLUMN ingkeeOfficialCaptureEnabled INTEGER NOT NULL DEFAULT 0",
                 )
             }
         }

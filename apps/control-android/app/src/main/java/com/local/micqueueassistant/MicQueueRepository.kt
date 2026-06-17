@@ -82,7 +82,15 @@ class MicQueueRepository(
         require(role in DeviceRole.entries.map(DeviceRole::value)) { "设备角色无效" }
         require(role != DeviceRole.UNSELECTED.value) { "请选择设备角色" }
         val current = dao.getConfig() ?: AppConfigEntity()
-        dao.saveConfig(current.copy(role = role, foregroundServiceEnabled = false))
+        dao.saveConfig(
+            current.copy(
+                role = role,
+                foregroundServiceEnabled = false,
+                wechatOfficialReplyEnabled = false,
+                ingkeeOfficialCaptureEnabled = false,
+                robotAutoReplyEnabled = false,
+            ),
+        )
         log("role.changed", "设备角色已切换为 $role")
         "设备角色已保存"
     }
@@ -135,17 +143,28 @@ class MicQueueRepository(
         baseUrl: String,
         roomId: String,
         deviceId: String,
+        deviceRole: String,
+        wechatOfficialReplyEnabled: Boolean,
+        ingkeeOfficialCaptureEnabled: Boolean,
+        wechatCalibrationStatus: String,
+        ingkeeCalibrationStatus: String,
     ): Result<String> = runCatching {
         val normalized = baseUrl.trim().trimEnd('/')
         require(normalized.startsWith("https://")) { "正式环境必须使用 HTTPS 地址" }
         require(roomId.isNotBlank()) { "厅房 ID 不能为空" }
         require(deviceId.isNotBlank()) { "设备 ID 不能为空" }
+        require(deviceRole in setOf(DeviceRole.ROBOT.value, DeviceRole.COLLECTOR.value)) { "云端设备角色无效" }
         val current = dao.getConfig() ?: AppConfigEntity()
         dao.saveConfig(
             current.copy(
                 cloudBaseUrl = normalized,
                 cloudRoomId = roomId.trim(),
                 cloudDeviceId = deviceId,
+                cloudDeviceRole = deviceRole,
+                wechatServerCapabilityEnabled = wechatOfficialReplyEnabled,
+                ingkeeServerCapabilityEnabled = ingkeeOfficialCaptureEnabled,
+                wechatCalibrationStatus = wechatCalibrationStatus,
+                ingkeeCalibrationStatus = ingkeeCalibrationStatus,
                 cloudSyncEnabled = true,
             ),
         )
@@ -162,10 +181,65 @@ class MicQueueRepository(
         dao.saveConfig(
             current.copy(
                 cloudDeviceId = "",
+                cloudDeviceRole = "",
+                wechatServerCapabilityEnabled = false,
+                ingkeeServerCapabilityEnabled = false,
+                wechatOfficialReplyEnabled = false,
+                ingkeeOfficialCaptureEnabled = false,
                 cloudSyncEnabled = false,
                 cloudLastSyncAtEpochMs = null,
             ),
         )
+    }
+
+    suspend fun updateCloudCapabilities(
+        roomId: String,
+        deviceRole: String,
+        wechatServerCapabilityEnabled: Boolean,
+        ingkeeServerCapabilityEnabled: Boolean,
+        wechatCalibrationStatus: String,
+        ingkeeCalibrationStatus: String,
+    ) {
+        val current = dao.getConfig() ?: AppConfigEntity()
+        dao.saveConfig(
+            current.copy(
+                cloudRoomId = roomId,
+                cloudDeviceRole = deviceRole,
+                wechatServerCapabilityEnabled = wechatServerCapabilityEnabled,
+                ingkeeServerCapabilityEnabled = ingkeeServerCapabilityEnabled,
+                wechatCalibrationStatus = wechatCalibrationStatus,
+                ingkeeCalibrationStatus = ingkeeCalibrationStatus,
+                wechatOfficialReplyEnabled = current.wechatOfficialReplyEnabled && wechatServerCapabilityEnabled,
+                ingkeeOfficialCaptureEnabled = current.ingkeeOfficialCaptureEnabled && ingkeeServerCapabilityEnabled,
+            ),
+        )
+    }
+
+    suspend fun setWechatOfficialCapability(enabled: Boolean): Result<String> = runCatching {
+        val current = dao.getConfig() ?: AppConfigEntity()
+        require(current.role == DeviceRole.ROBOT.value) { "当前不是微信机器人端" }
+        if (enabled) require(current.wechatServerCapabilityEnabled) { "管理台尚未启用微信设备能力" }
+        dao.saveConfig(
+            current.copy(
+                wechatOfficialReplyEnabled = enabled,
+                robotAutoReplyEnabled = enabled,
+                wechatCalibrationStatus = if (enabled) "已校准" else "微信自动回复待校准",
+            ),
+        )
+        if (enabled) "正式微信自动回复已在本机启用" else "正式微信自动回复已关闭"
+    }
+
+    suspend fun setIngkeeOfficialCapability(enabled: Boolean): Result<String> = runCatching {
+        val current = dao.getConfig() ?: AppConfigEntity()
+        require(current.role == DeviceRole.COLLECTOR.value) { "当前不是映客采集端" }
+        if (enabled) require(current.ingkeeServerCapabilityEnabled) { "管理台尚未启用映客设备能力" }
+        dao.saveConfig(
+            current.copy(
+                ingkeeOfficialCaptureEnabled = enabled,
+                ingkeeCalibrationStatus = if (enabled) "已校准" else "映客麦位识别待校准",
+            ),
+        )
+        if (enabled) "正式映客麦位采集已在本机启用" else "正式映客麦位采集已关闭"
     }
 
     suspend fun setPairingCode(code: String): Result<String> = runCatching {

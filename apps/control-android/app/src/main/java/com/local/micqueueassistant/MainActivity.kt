@@ -617,7 +617,6 @@ private fun RobotSettings(
     var owner by remember(config.ownerWechatName) { mutableStateOf(config.ownerWechatName) }
     var newAdmin by remember { mutableStateOf("") }
     var cloudUrl by remember(config.cloudBaseUrl) { mutableStateOf(config.cloudBaseUrl) }
-    var roomId by remember(config.cloudRoomId) { mutableStateOf(config.cloudRoomId) }
     var enrollmentToken by remember { mutableStateOf("") }
     var deviceName by remember { mutableStateOf("微信厅控端") }
     LazyColumn(
@@ -625,8 +624,13 @@ private fun RobotSettings(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         item {
-            Text("微信自动回复待校准", color = Color(0xFFB54708), fontWeight = FontWeight.Bold)
-            Text("正式微信不会自动发送；模拟群完整启用。")
+            Text(
+                if (config.wechatOfficialReplyEnabled) "正式微信自动回复已启用" else "微信自动回复待校准",
+                color = if (config.wechatOfficialReplyEnabled) Color(0xFF027A48) else Color(0xFFB54708),
+                fontWeight = FontWeight.Bold,
+            )
+            Text("正式微信仅在包名、版本、群名、页面节点和本机能力全部通过时发送；模拟群完整启用。")
+            Text("管理台能力：${if (config.wechatServerCapabilityEnabled) "已启用" else "未启用"}")
         }
         item { OutlinedTextField(group, { group = it }, label = { Text("指定微信群名称") }, modifier = Modifier.fillMaxWidth()) }
         item { OutlinedTextField(owner, { owner = it }, label = { Text("主人微信昵称") }, modifier = Modifier.fillMaxWidth()) }
@@ -637,13 +641,12 @@ private fun RobotSettings(
         }
         item { Text("私有云设备", fontWeight = FontWeight.Bold) }
         item { OutlinedTextField(cloudUrl, { cloudUrl = it }, label = { Text("中台 HTTPS 地址") }, modifier = Modifier.fillMaxWidth()) }
-        item { OutlinedTextField(roomId, { roomId = it }, label = { Text("厅房 ID") }, modifier = Modifier.fillMaxWidth()) }
         item { OutlinedTextField(deviceName, { deviceName = it }, label = { Text("设备名称") }, modifier = Modifier.fillMaxWidth()) }
         item {
             OutlinedTextField(
                 enrollmentToken,
                 { enrollmentToken = it },
-                label = { Text("一次性管理员注册令牌") },
+                label = { Text("10 分钟一次性设备注册令牌") },
                 visualTransformation = PasswordVisualTransformation(),
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -651,7 +654,7 @@ private fun RobotSettings(
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
-                    viewModel.enrollCloud(cloudUrl, roomId, enrollmentToken, deviceName)
+                    viewModel.enrollCloud(cloudUrl, enrollmentToken, deviceName)
                     enrollmentToken = ""
                 }) { Text("注册厅控设备") }
                 OutlinedButton(onClick = viewModel::disconnectCloud) { Text("解除注册") }
@@ -660,8 +663,22 @@ private fun RobotSettings(
         item {
             Text(
                 if (config.cloudDeviceId.isBlank()) "云端设备尚未注册"
-                else "设备 ID：${config.cloudDeviceId}\n最近同步：${formatTime(config.cloudLastSyncAtEpochMs)}",
+                else "设备 ID：${config.cloudDeviceId}\n厅房 ID：${config.cloudRoomId}\n云端角色：${config.cloudDeviceRole}\n最近同步：${formatTime(config.cloudLastSyncAtEpochMs)}",
             )
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    enabled = config.cloudDeviceId.isNotBlank() &&
+                        config.wechatServerCapabilityEnabled &&
+                        !config.wechatOfficialReplyEnabled,
+                    onClick = { viewModel.setWechatOfficialCapability(true) },
+                ) { Text("真机校准通过，启用微信") }
+                OutlinedButton(
+                    enabled = config.wechatOfficialReplyEnabled,
+                    onClick = { viewModel.setWechatOfficialCapability(false) },
+                ) { Text("关闭正式微信") }
+            }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -698,7 +715,6 @@ private fun CollectorSettings(
 ) {
     val config by viewModel.config.collectAsState()
     var cloudUrl by remember(config.cloudBaseUrl) { mutableStateOf(config.cloudBaseUrl) }
-    var roomId by remember(config.cloudRoomId) { mutableStateOf(config.cloudRoomId) }
     var enrollmentToken by remember { mutableStateOf("") }
     var deviceName by remember { mutableStateOf("映客麦位采集端") }
     LazyColumn(
@@ -706,17 +722,21 @@ private fun CollectorSettings(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         item {
-            Text("映客麦位识别待校准", color = Color(0xFFB54708), fontWeight = FontWeight.Bold)
-            Text("正式映客不会开始计时；模拟语音房完整启用。")
+            Text(
+                if (config.ingkeeOfficialCaptureEnabled) "正式映客麦位采集已启用" else "映客麦位识别待校准",
+                color = if (config.ingkeeOfficialCaptureEnabled) Color(0xFF027A48) else Color(0xFFB54708),
+                fontWeight = FontWeight.Bold,
+            )
+            Text("正式映客仅在包名、9.8.60 版本、语音房页面和麦位节点全部通过时采集；模拟语音房完整启用。")
+            Text("管理台能力：${if (config.ingkeeServerCapabilityEnabled) "已启用" else "未启用"}")
         }
         item { OutlinedTextField(cloudUrl, { cloudUrl = it }, label = { Text("中台 HTTPS 地址") }, modifier = Modifier.fillMaxWidth()) }
-        item { OutlinedTextField(roomId, { roomId = it }, label = { Text("厅房 ID") }, modifier = Modifier.fillMaxWidth()) }
         item { OutlinedTextField(deviceName, { deviceName = it }, label = { Text("设备名称") }, modifier = Modifier.fillMaxWidth()) }
         item {
             OutlinedTextField(
                 enrollmentToken,
                 { enrollmentToken = it },
-                label = { Text("一次性管理员注册令牌") },
+                label = { Text("10 分钟一次性设备注册令牌") },
                 visualTransformation = PasswordVisualTransformation(),
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -724,7 +744,7 @@ private fun CollectorSettings(
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
-                    viewModel.enrollCloud(cloudUrl, roomId, enrollmentToken, deviceName)
+                    viewModel.enrollCloud(cloudUrl, enrollmentToken, deviceName)
                     enrollmentToken = ""
                 }) { Text("注册厅控设备") }
                 OutlinedButton(onClick = viewModel::disconnectCloud) { Text("解除注册") }
@@ -733,8 +753,22 @@ private fun CollectorSettings(
         item {
             Text(
                 if (config.cloudDeviceId.isBlank()) "云端设备尚未注册"
-                else "设备 ID：${config.cloudDeviceId}\n最近同步：${formatTime(config.cloudLastSyncAtEpochMs)}",
+                else "设备 ID：${config.cloudDeviceId}\n厅房 ID：${config.cloudRoomId}\n云端角色：${config.cloudDeviceRole}\n最近同步：${formatTime(config.cloudLastSyncAtEpochMs)}",
             )
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    enabled = config.cloudDeviceId.isNotBlank() &&
+                        config.ingkeeServerCapabilityEnabled &&
+                        !config.ingkeeOfficialCaptureEnabled,
+                    onClick = { viewModel.setIngkeeOfficialCapability(true) },
+                ) { Text("真机校准通过，启用映客") }
+                OutlinedButton(
+                    enabled = config.ingkeeOfficialCaptureEnabled,
+                    onClick = { viewModel.setIngkeeOfficialCapability(false) },
+                ) { Text("关闭正式映客") }
+            }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

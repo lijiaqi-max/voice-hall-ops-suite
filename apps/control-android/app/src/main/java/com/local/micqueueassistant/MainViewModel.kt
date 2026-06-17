@@ -58,12 +58,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun saveCollectorConfig(host: String, port: Int, code: String) =
         runAction { repository.updateCollectorConfig(host, port, code) }
 
-    fun enrollCloud(baseUrl: String, roomId: String, token: String, deviceName: String) =
+    fun enrollCloud(baseUrl: String, token: String, deviceName: String) =
         runAction {
             PairingTransportManager.enroll(
                 getApplication(),
                 baseUrl,
-                roomId,
                 token,
                 deviceName,
             )
@@ -71,6 +70,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun disconnectCloud() =
         runAction { PairingTransportManager.disconnect(getApplication()) }
+
+    fun setWechatOfficialCapability(enabled: Boolean) =
+        runAction { repository.setWechatOfficialCapability(enabled) }
+
+    fun setIngkeeOfficialCapability(enabled: Boolean) =
+        runAction { repository.setIngkeeOfficialCapability(enabled) }
 
     fun addAdmin(name: String) = runAction { repository.addAdmin(name) }
     fun removeAdmin(id: String) = runAction { repository.removeAdmin(id) }
