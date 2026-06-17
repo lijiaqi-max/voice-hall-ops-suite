@@ -1,4 +1,5 @@
 export { Dashboard } from "./Dashboard";
+export { LaunchPage } from "./LaunchPage";
 export { RoomsPage } from "./RoomsPage";
 export { ShiftsPage } from "./ShiftsPage";
 export { ControlPage } from "./ControlPage";

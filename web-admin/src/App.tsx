@@ -19,6 +19,7 @@ import { AppShell } from "./layouts/AppShell";
 import { hasPermission } from "./permissions";
 
 const Dashboard = lazy(() => import("./components/pages/Dashboard").then((m) => ({ default: m.Dashboard })));
+const LaunchPage = lazy(() => import("./components/pages/LaunchPage").then((m) => ({ default: m.LaunchPage })));
 const RoomsPage = lazy(() => import("./components/pages/RoomsPage").then((m) => ({ default: m.RoomsPage })));
 const ShiftsPage = lazy(() => import("./components/pages/ShiftsPage").then((m) => ({ default: m.ShiftsPage })));
 const ControlPage = lazy(() => import("./components/pages/ControlPage").then((m) => ({ default: m.ControlPage })));
@@ -154,6 +155,19 @@ function AppLayout() {
             attendance={attendance}
             settlements={settlements}
           />} />
+          <Route path="/launch" element={guarded("rooms.read", <LaunchPage
+            rooms={rooms}
+            accounts={accounts}
+            shifts={shifts}
+            customers={customers}
+            tasks={tasks}
+            report={report}
+            micSegments={micSegments}
+            settlements={settlements}
+            audit={audit}
+            call={call}
+            canManageDevices={can("devices.write")}
+          />)} />
           <Route path="/rooms" element={guarded("rooms.read", <RoomsPage rooms={rooms} call={call} reload={loadAll} notify={notify} />)} />
           <Route path="/shifts" element={guarded("shifts.read", <ShiftsPage rooms={rooms} accounts={accounts} shifts={shifts} call={call} reload={loadAll} notify={notify} />)} />
           <Route path="/control" element={guarded("mic.read", <ControlPage rooms={rooms} call={call} canManageDevices={can("devices.write")} />)} />

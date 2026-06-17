@@ -5,6 +5,7 @@ import type { Session } from "../types";
 
 export const navigation = [
   { id: "/", label: "经营看板", icon: "⌁", permissions: [] },
+  { id: "/launch", label: "上线向导", icon: "◎", permissions: ["rooms.read"] },
   { id: "/rooms", label: "厅房管理", icon: "⌂", permissions: ["rooms.read"] },
   { id: "/shifts", label: "主持排班", icon: "◫", permissions: ["shifts.read"] },
   { id: "/control", label: "厅控数据", icon: "⌁", permissions: ["mic.read"] },
