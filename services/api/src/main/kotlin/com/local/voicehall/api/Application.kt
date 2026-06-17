@@ -209,6 +209,18 @@ fun Application.module(
             }
         }
 
+        post("/devices/bootstrap") {
+            call.respond(HttpStatusCode.Created, repository.bootstrapDevice(call.receive()))
+        }
+
+        post("/devices/config") {
+            val deviceId = call.request.headers["X-Device-Id"].orEmpty()
+            val timestamp = call.request.headers["X-Timestamp"].orEmpty()
+            val signature = call.request.headers["X-Signature"].orEmpty()
+            val rawBody = call.receiveText()
+            call.respond(repository.deviceConfig(deviceId, timestamp, signature, rawBody))
+        }
+
         post("/devices/events") {
             val deviceId = call.request.headers["X-Device-Id"].orEmpty()
             val timestamp = call.request.headers["X-Timestamp"].orEmpty()
@@ -481,9 +493,20 @@ fun Application.module(
                     call.requirePermission("devices.write")
                     call.respond(repository.listDevices(call.identity()))
                 }
+                post("/registration-tokens") {
+                    call.requirePermission("devices.write")
+                    call.respond(
+                        HttpStatusCode.Created,
+                        repository.createDeviceRegistrationToken(call.identity(), call.receive()),
+                    )
+                }
                 post("/register") {
                     call.requirePermission("devices.write")
                     call.respond(HttpStatusCode.Created, repository.registerDevice(call.identity(), call.receive()))
+                }
+                post("/{id}/calibration") {
+                    call.requirePermission("devices.write")
+                    call.respond(repository.updateDeviceCalibration(call.identity(), call.requiredId(), call.receive()))
                 }
                 post("/{id}/disable") {
                     call.requirePermission("devices.write")

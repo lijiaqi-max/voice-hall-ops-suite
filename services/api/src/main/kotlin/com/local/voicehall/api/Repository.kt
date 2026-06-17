@@ -1601,15 +1601,131 @@ class OpsRepository(
             ReportSummary(start, end, gross, taskCounts.first, taskCounts.second, customerCount, roomTotals, daily)
         }
 
-    fun registerDevice(identity: RequestIdentity, input: DeviceRegistrationInput): DeviceRegistrationResponse =
+    fun createDeviceRegistrationToken(
+        identity: RequestIdentity,
+        input: DeviceRegistrationTokenInput,
+    ): DeviceRegistrationTokenView =
         dataSource.transaction { connection ->
             requireRoomAccess(connection, identity, input.roomId)
+            require(input.role in DeviceRoles.all) { "设备角色无效" }
+            val ttlMs = input.ttlSeconds.coerceIn(60, 600) * 1_000L
+            val rawToken = deviceCrypto.newSecret()
+            val tokenId = id()
+            val expiresAt = now() + ttlMs
+            connection.prepareStatement(
+                """
+                INSERT INTO device_registration_tokens(
+                    id,organization_id,room_id,role,token_sha256,expires_at,created_by,created_at
+                ) VALUES (?,?,?,?,?,?,?,?)
+                """.trimIndent(),
+            ).use {
+                it.setString(1, tokenId)
+                it.setString(2, identity.organizationId)
+                it.setString(3, input.roomId)
+                it.setString(4, input.role)
+                it.setString(5, sha256(rawToken))
+                it.setLong(6, expiresAt)
+                it.setString(7, identity.accountId)
+                it.setLong(8, now())
+                it.executeUpdate()
+            }
+            audit(
+                connection,
+                identity,
+                "device.registration_token.create",
+                "device_registration_token",
+                tokenId,
+                "生成一次性设备注册令牌 ${input.role}",
+            )
+            DeviceRegistrationTokenView(tokenId, input.roomId, input.role, rawToken, expiresAt)
+        }
+
+    fun bootstrapDevice(input: DeviceBootstrapInput): DeviceRegistrationResponse =
+        dataSource.transaction { connection ->
+            val cleanName = input.deviceName.trim()
+            require(cleanName.length in 2..80) { "设备名称长度必须为 2–80" }
+            val tokenHash = sha256(input.registrationToken.trim())
+            val token = connection.prepareStatement(
+                """
+                SELECT id,organization_id,room_id,role,expires_at,used_at,created_by
+                FROM device_registration_tokens
+                WHERE token_sha256=? FOR UPDATE
+                """.trimIndent(),
+            ).use {
+                it.setString(1, tokenHash)
+                it.executeQuery().use { rows ->
+                    check(rows.next()) { "设备注册令牌无效" }
+                    RegistrationTokenRow(
+                        id = rows.getString("id"),
+                        organizationId = rows.getString("organization_id"),
+                        roomId = rows.getString("room_id"),
+                        role = rows.getString("role"),
+                        expiresAt = rows.getLong("expires_at"),
+                        usedAt = rows.getNullableLong("used_at"),
+                        createdBy = rows.getString("created_by"),
+                    )
+                }
+            }
+            check(token.usedAt == null) { "设备注册令牌已使用" }
+            check(token.expiresAt >= now()) { "设备注册令牌已过期" }
+            require(token.role in DeviceRoles.all) { "设备注册令牌角色无效" }
             val secret = deviceCrypto.newSecret()
             val deviceId = id()
             connection.prepareStatement(
                 """
-                INSERT INTO devices(id,organization_id,room_id,name,secret_ciphertext,enabled,created_at)
-                VALUES (?,?,?,?,?,TRUE,?)
+                INSERT INTO devices(
+                    id,organization_id,room_id,name,secret_ciphertext,enabled,created_at,role,
+                    wechat_group_reply_enabled,ingkee_voice_room_capture_enabled,
+                    wechat_calibration_status,ingkee_calibration_status
+                ) VALUES (?,?,?,?,?,TRUE,?,?,FALSE,FALSE,'待校准','待校准')
+                """.trimIndent(),
+            ).use {
+                it.setString(1, deviceId)
+                it.setString(2, token.organizationId)
+                it.setString(3, token.roomId)
+                it.setString(4, cleanName)
+                it.setString(5, deviceCrypto.encrypt(secret))
+                it.setLong(6, now())
+                it.setString(7, token.role)
+                it.executeUpdate()
+            }
+            connection.prepareStatement(
+                "UPDATE device_registration_tokens SET used_at=? WHERE id=?",
+            ).use {
+                it.setLong(1, now())
+                it.setString(2, token.id)
+                it.executeUpdate()
+            }
+            auditSystem(
+                connection,
+                token.organizationId,
+                token.createdBy,
+                "device.bootstrap",
+                "device",
+                deviceId,
+                "厅控设备 ${cleanName} 使用一次性令牌注册",
+            )
+            DeviceRegistrationResponse(
+                deviceId = deviceId,
+                deviceSecret = secret,
+                roomId = token.roomId,
+                role = token.role,
+            )
+        }
+
+    fun registerDevice(identity: RequestIdentity, input: DeviceRegistrationInput): DeviceRegistrationResponse =
+        dataSource.transaction { connection ->
+            requireRoomAccess(connection, identity, input.roomId)
+            require(input.role in DeviceRoles.all) { "设备角色无效" }
+            val secret = deviceCrypto.newSecret()
+            val deviceId = id()
+            connection.prepareStatement(
+                """
+                INSERT INTO devices(
+                    id,organization_id,room_id,name,secret_ciphertext,enabled,created_at,role,
+                    wechat_group_reply_enabled,ingkee_voice_room_capture_enabled,
+                    wechat_calibration_status,ingkee_calibration_status
+                ) VALUES (?,?,?,?,?,TRUE,?,?,FALSE,FALSE,'待校准','待校准')
                 """.trimIndent(),
             ).use {
                 it.setString(1, deviceId)
@@ -1618,10 +1734,11 @@ class OpsRepository(
                 it.setString(4, input.name.trim())
                 it.setString(5, deviceCrypto.encrypt(secret))
                 it.setLong(6, now())
+                it.setString(7, input.role)
                 it.executeUpdate()
             }
             audit(connection, identity, "device.register", "device", deviceId, "注册厅控设备 ${input.name}")
-            DeviceRegistrationResponse(deviceId, secret)
+            DeviceRegistrationResponse(deviceId, secret, input.roomId, input.role)
         }
 
     fun listDevices(identity: RequestIdentity): List<DeviceView> =
@@ -1633,7 +1750,10 @@ class OpsRepository(
             }
             connection.prepareStatement(
                 """
-                SELECT id,room_id,name,enabled,last_seen_at
+                SELECT id,room_id,name,role,enabled,
+                       wechat_group_reply_enabled,ingkee_voice_room_capture_enabled,
+                       wechat_calibration_status,ingkee_calibration_status,
+                       calibrated_at,calibration_summary,last_seen_at
                 FROM devices
                 WHERE organization_id=? $roomScope
                 ORDER BY created_at DESC
@@ -1647,7 +1767,14 @@ class OpsRepository(
                             id = getString("id"),
                             roomId = getString("room_id"),
                             name = getString("name"),
+                            role = getString("role"),
                             enabled = getBoolean("enabled"),
+                            wechatGroupReplyEnabled = getBoolean("wechat_group_reply_enabled"),
+                            ingkeeVoiceRoomCaptureEnabled = getBoolean("ingkee_voice_room_capture_enabled"),
+                            wechatCalibrationStatus = getString("wechat_calibration_status"),
+                            ingkeeCalibrationStatus = getString("ingkee_calibration_status"),
+                            calibratedAtEpochMs = getNullableLong("calibrated_at"),
+                            calibrationSummary = getString("calibration_summary"),
                             lastSeenAtEpochMs = getNullableLong("last_seen_at"),
                         )
                     }
@@ -1659,7 +1786,10 @@ class OpsRepository(
         dataSource.transaction { connection ->
             val device = connection.prepareStatement(
                 """
-                SELECT id,room_id,name,enabled,last_seen_at
+                SELECT id,room_id,name,role,enabled,
+                       wechat_group_reply_enabled,ingkee_voice_room_capture_enabled,
+                       wechat_calibration_status,ingkee_calibration_status,
+                       calibrated_at,calibration_summary,last_seen_at
                 FROM devices
                 WHERE id=? AND organization_id=? FOR UPDATE
                 """.trimIndent(),
@@ -1672,7 +1802,14 @@ class OpsRepository(
                         id = rows.getString("id"),
                         roomId = rows.getString("room_id"),
                         name = rows.getString("name"),
+                        role = rows.getString("role"),
                         enabled = rows.getBoolean("enabled"),
+                        wechatGroupReplyEnabled = rows.getBoolean("wechat_group_reply_enabled"),
+                        ingkeeVoiceRoomCaptureEnabled = rows.getBoolean("ingkee_voice_room_capture_enabled"),
+                        wechatCalibrationStatus = rows.getString("wechat_calibration_status"),
+                        ingkeeCalibrationStatus = rows.getString("ingkee_calibration_status"),
+                        calibratedAtEpochMs = rows.getNullableLong("calibrated_at"),
+                        calibrationSummary = rows.getString("calibration_summary"),
                         lastSeenAtEpochMs = rows.getNullableLong("last_seen_at"),
                     )
                 }
@@ -1687,6 +1824,67 @@ class OpsRepository(
             }
             audit(connection, identity, "device.disable", "device", deviceId, "Disabled device ${device.name}")
             device.copy(enabled = false)
+        }
+
+    fun updateDeviceCalibration(
+        identity: RequestIdentity,
+        deviceId: String,
+        input: DeviceCalibrationInput,
+    ): DeviceView =
+        dataSource.transaction { connection ->
+            require(input.capability in AdapterCapabilities.all) { "设备能力无效" }
+            val device = loadDeviceForUpdate(connection, identity.organizationId, deviceId)
+            requireRoomAccess(connection, identity, device.roomId)
+            val allowed = when (device.role) {
+                DeviceRoles.ROBOT -> input.capability == AdapterCapabilities.WECHAT_GROUP_REPLY
+                DeviceRoles.COLLECTOR -> input.capability == AdapterCapabilities.INGKEE_VOICE_ROOM_CAPTURE
+                else -> false
+            }
+            check(allowed) { "设备角色不支持该能力" }
+            val summary = input.summary?.trim()?.takeIf(String::isNotBlank)?.take(500)
+            when (input.capability) {
+                AdapterCapabilities.WECHAT_GROUP_REPLY -> connection.prepareStatement(
+                    """
+                    UPDATE devices
+                    SET wechat_group_reply_enabled=?,wechat_calibration_status=?,
+                        calibrated_at=?,calibration_summary=?
+                    WHERE id=? AND organization_id=?
+                    """.trimIndent(),
+                ).use {
+                    it.setBoolean(1, input.enabled)
+                    it.setString(2, if (input.enabled) input.status.take(80) else "已关闭")
+                    it.setNullableLong(3, if (input.enabled) now() else null)
+                    it.setNullableString(4, summary)
+                    it.setString(5, deviceId)
+                    it.setString(6, identity.organizationId)
+                    it.executeUpdate()
+                }
+                AdapterCapabilities.INGKEE_VOICE_ROOM_CAPTURE -> connection.prepareStatement(
+                    """
+                    UPDATE devices
+                    SET ingkee_voice_room_capture_enabled=?,ingkee_calibration_status=?,
+                        calibrated_at=?,calibration_summary=?
+                    WHERE id=? AND organization_id=?
+                    """.trimIndent(),
+                ).use {
+                    it.setBoolean(1, input.enabled)
+                    it.setString(2, if (input.enabled) input.status.take(80) else "已关闭")
+                    it.setNullableLong(3, if (input.enabled) now() else null)
+                    it.setNullableString(4, summary)
+                    it.setString(5, deviceId)
+                    it.setString(6, identity.organizationId)
+                    it.executeUpdate()
+                }
+            }
+            audit(
+                connection,
+                identity,
+                "device.calibration.update",
+                "device",
+                deviceId,
+                "更新设备能力 ${input.capability}=${input.enabled}",
+            )
+            loadDeviceForUpdate(connection, identity.organizationId, deviceId)
         }
 
     fun listMicSegments(
@@ -1883,20 +2081,8 @@ class OpsRepository(
         rawBody: String,
         event: DeviceEventInput,
     ): DeviceEventStoreResult = dataSource.transaction { connection ->
-        val timestampMs = timestamp.toLongOrNull() ?: error("设备时间戳无效")
-        check(kotlin.math.abs(now() - timestampMs) <= 5 * 60_000L) { "设备请求已过期" }
-        val device = connection.prepareStatement(
-            "SELECT organization_id,room_id,secret_ciphertext,enabled FROM devices WHERE id=?",
-        ).use {
-            it.setString(1, deviceId)
-            it.executeQuery().use { rows ->
-                check(rows.next() && rows.getBoolean("enabled")) { "设备不存在或已禁用" }
-                DeviceRow(rows.getString(1), rows.getString(2), rows.getString(3))
-            }
-        }
+        val device = verifyDeviceRequest(connection, deviceId, timestamp, signature, rawBody)
         check(event.roomId == device.roomId) { "设备无权写入其他厅房" }
-        val secret = deviceCrypto.decrypt(device.encryptedSecret)
-        check(deviceCrypto.verify(secret, timestamp, rawBody, signature)) { "设备签名无效" }
         val inserted = connection.prepareStatement(
             """
             INSERT INTO device_events(
@@ -1981,6 +2167,38 @@ class OpsRepository(
             it.setLong(1, now()); it.setString(2, deviceId); it.executeUpdate()
         }
         DeviceEventStoreResult(inserted == 1, accepted)
+    }
+
+    fun deviceConfig(
+        deviceId: String,
+        timestamp: String,
+        signature: String,
+        rawBody: String,
+    ): DeviceConfigResponse = dataSource.transaction { connection ->
+        verifyDeviceRequest(connection, deviceId, timestamp, signature, rawBody)
+        connection.prepareStatement(
+            """
+            SELECT id,room_id,role,enabled,wechat_group_reply_enabled,ingkee_voice_room_capture_enabled,
+                   wechat_calibration_status,ingkee_calibration_status
+            FROM devices
+            WHERE id=?
+            """.trimIndent(),
+        ).use {
+            it.setString(1, deviceId)
+            it.executeQuery().use { rows ->
+                check(rows.next() && rows.getBoolean("enabled")) { "设备不存在或已禁用" }
+                DeviceConfigResponse(
+                    deviceId = rows.getString("id"),
+                    roomId = rows.getString("room_id"),
+                    role = rows.getString("role"),
+                    enabled = rows.getBoolean("enabled"),
+                    wechatGroupReplyEnabled = rows.getBoolean("wechat_group_reply_enabled"),
+                    ingkeeVoiceRoomCaptureEnabled = rows.getBoolean("ingkee_voice_room_capture_enabled"),
+                    wechatCalibrationStatus = rows.getString("wechat_calibration_status"),
+                    ingkeeCalibrationStatus = rows.getString("ingkee_calibration_status"),
+                )
+            }
+        }
     }
 
     fun listAudit(identity: RequestIdentity, limit: Int): List<AuditView> =
@@ -2723,6 +2941,75 @@ class OpsRepository(
         ).joinToString("|"),
     )
 
+    private data class RegistrationTokenRow(
+        val id: String,
+        val organizationId: String,
+        val roomId: String,
+        val role: String,
+        val expiresAt: Long,
+        val usedAt: Long?,
+        val createdBy: String,
+    )
+
+    private fun loadDeviceForUpdate(
+        connection: Connection,
+        organizationId: String,
+        deviceId: String,
+    ): DeviceView =
+        connection.prepareStatement(
+            """
+            SELECT id,room_id,name,role,enabled,
+                   wechat_group_reply_enabled,ingkee_voice_room_capture_enabled,
+                   wechat_calibration_status,ingkee_calibration_status,
+                   calibrated_at,calibration_summary,last_seen_at
+            FROM devices
+            WHERE id=? AND organization_id=? FOR UPDATE
+            """.trimIndent(),
+        ).use {
+            it.setString(1, deviceId)
+            it.setString(2, organizationId)
+            it.executeQuery().use { rows ->
+                check(rows.next()) { "Device does not exist" }
+                DeviceView(
+                    id = rows.getString("id"),
+                    roomId = rows.getString("room_id"),
+                    name = rows.getString("name"),
+                    role = rows.getString("role"),
+                    enabled = rows.getBoolean("enabled"),
+                    wechatGroupReplyEnabled = rows.getBoolean("wechat_group_reply_enabled"),
+                    ingkeeVoiceRoomCaptureEnabled = rows.getBoolean("ingkee_voice_room_capture_enabled"),
+                    wechatCalibrationStatus = rows.getString("wechat_calibration_status"),
+                    ingkeeCalibrationStatus = rows.getString("ingkee_calibration_status"),
+                    calibratedAtEpochMs = rows.getNullableLong("calibrated_at"),
+                    calibrationSummary = rows.getString("calibration_summary"),
+                    lastSeenAtEpochMs = rows.getNullableLong("last_seen_at"),
+                )
+            }
+        }
+
+    private fun verifyDeviceRequest(
+        connection: Connection,
+        deviceId: String,
+        timestamp: String,
+        signature: String,
+        rawBody: String,
+    ): DeviceRow {
+        val timestampMs = timestamp.toLongOrNull() ?: error("设备时间戳无效")
+        check(kotlin.math.abs(now() - timestampMs) <= 5 * 60_000L) { "设备请求已过期" }
+        val device = connection.prepareStatement(
+            "SELECT organization_id,room_id,secret_ciphertext,enabled FROM devices WHERE id=?",
+        ).use {
+            it.setString(1, deviceId)
+            it.executeQuery().use { rows ->
+                check(rows.next() && rows.getBoolean("enabled")) { "设备不存在或已禁用" }
+                DeviceRow(rows.getString(1), rows.getString(2), rows.getString(3))
+            }
+        }
+        val secret = deviceCrypto.decrypt(device.encryptedSecret)
+        check(deviceCrypto.verify(secret, timestamp, rawBody, signature)) { "设备签名无效" }
+        return device
+    }
+
     private fun audit(
         connection: Connection,
         identity: RequestIdentity,
@@ -2742,6 +3029,34 @@ class OpsRepository(
             it.setString(3, identity.accountId); it.setString(4, action)
             it.setString(5, resourceType); it.setNullableString(6, resourceId)
             it.setString(7, summary); it.setLong(8, now()); it.executeUpdate()
+        }
+    }
+
+    private fun auditSystem(
+        connection: Connection,
+        organizationId: String,
+        accountId: String,
+        action: String,
+        resourceType: String,
+        resourceId: String?,
+        summary: String,
+    ) {
+        connection.prepareStatement(
+            """
+            INSERT INTO audit_logs(
+                id,organization_id,account_id,action,resource_type,resource_id,summary,created_at
+            ) VALUES (?,?,?,?,?,?,?,?)
+            """.trimIndent(),
+        ).use {
+            it.setString(1, id())
+            it.setString(2, organizationId)
+            it.setString(3, accountId)
+            it.setString(4, action)
+            it.setString(5, resourceType)
+            it.setNullableString(6, resourceId)
+            it.setString(7, summary)
+            it.setLong(8, now())
+            it.executeUpdate()
         }
     }
 

@@ -20,6 +20,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.util.Base64
 import java.util.UUID
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
@@ -207,6 +209,76 @@ class SecurityAndScopeIntegrationTest {
             assertEquals(HttpStatusCode.Created, registration.status)
             val deviceId = json.parseToJsonElement(registration.bodyAsText())
                 .jsonObject.getValue("deviceId").jsonPrimitive.content
+            val tokenResponse = client.post("/devices/registration-tokens") {
+                authorized(adminToken)
+                setBody("""{"roomId":"$room1","role":"robot","ttlSeconds":600}""")
+            }
+            assertEquals(HttpStatusCode.Created, tokenResponse.status, tokenResponse.bodyAsText())
+            val tokenJson = json.parseToJsonElement(tokenResponse.bodyAsText()).jsonObject
+            assertEquals("robot", tokenJson.getValue("role").jsonPrimitive.content)
+            val bootstrap = client.post("/devices/bootstrap") {
+                contentType(ContentType.Application.Json)
+                setBody(
+                    """
+                    {
+                      "registrationToken":"${tokenJson.getValue("token").jsonPrimitive.content}",
+                      "deviceName":"WeChat production phone"
+                    }
+                    """.trimIndent(),
+                )
+            }
+            assertEquals(HttpStatusCode.Created, bootstrap.status, bootstrap.bodyAsText())
+            val bootstrapJson = json.parseToJsonElement(bootstrap.bodyAsText()).jsonObject
+            assertEquals(room1, bootstrapJson.getValue("roomId").jsonPrimitive.content)
+            assertEquals("robot", bootstrapJson.getValue("role").jsonPrimitive.content)
+            val reused = client.post("/devices/bootstrap") {
+                contentType(ContentType.Application.Json)
+                setBody(
+                    """
+                    {
+                      "registrationToken":"${tokenJson.getValue("token").jsonPrimitive.content}",
+                      "deviceName":"Reuse phone"
+                    }
+                    """.trimIndent(),
+                )
+            }
+            assertEquals(HttpStatusCode.Conflict, reused.status)
+            val bootstrappedDeviceId = bootstrapJson.getValue("deviceId").jsonPrimitive.content
+            val calibrated = client.post("/devices/$bootstrappedDeviceId/calibration") {
+                authorized(adminToken)
+                setBody("""{"capability":"wechat_group_reply","enabled":true,"status":"已校准","summary":"真机验收通过"}""")
+            }
+            assertEquals(HttpStatusCode.OK, calibrated.status, calibrated.bodyAsText())
+            val calibratedJson = json.parseToJsonElement(calibrated.bodyAsText()).jsonObject
+            assertEquals("true", calibratedJson.getValue("wechatGroupReplyEnabled").jsonPrimitive.content)
+            assertEquals("已校准", calibratedJson.getValue("wechatCalibrationStatus").jsonPrimitive.content)
+            val configBody = "{}"
+            val configTimestamp = System.currentTimeMillis().toString()
+            val deviceConfig = client.post("/devices/config") {
+                contentType(ContentType.Application.Json)
+                header("X-Device-Id", bootstrappedDeviceId)
+                header("X-Timestamp", configTimestamp)
+                header(
+                    "X-Signature",
+                    signature(
+                        bootstrapJson.getValue("deviceSecret").jsonPrimitive.content,
+                        configTimestamp,
+                        configBody,
+                    ),
+                )
+                setBody(configBody)
+            }
+            assertEquals(HttpStatusCode.OK, deviceConfig.status, deviceConfig.bodyAsText())
+            assertEquals(
+                "true",
+                json.parseToJsonElement(deviceConfig.bodyAsText())
+                    .jsonObject.getValue("wechatGroupReplyEnabled").jsonPrimitive.content,
+            )
+            val wrongCapability = client.post("/devices/$bootstrappedDeviceId/calibration") {
+                authorized(adminToken)
+                setBody("""{"capability":"ingkee_voice_room_capture","enabled":true}""")
+            }
+            assertEquals(HttpStatusCode.Conflict, wrongCapability.status)
             val disabled = client.post("/devices/$deviceId/disable") {
                 header(HttpHeaders.Authorization, "Bearer $adminToken")
             }
@@ -292,6 +364,13 @@ class SecurityAndScopeIntegrationTest {
     private fun io.ktor.client.request.HttpRequestBuilder.authorized(token: String) {
         contentType(ContentType.Application.Json)
         header(HttpHeaders.Authorization, "Bearer $token")
+    }
+
+    private fun signature(secret: String, timestamp: String, body: String): String {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(secret.toByteArray(Charsets.UTF_8), "HmacSHA256"))
+        return mac.doFinal("$timestamp\n$body".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
     }
 
     private fun testEnvironment(): Map<String, String> = mapOf(

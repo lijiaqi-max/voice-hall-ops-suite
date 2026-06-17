@@ -389,19 +389,93 @@ data class RoomRevenue(val roomId: String, val roomName: String, val grossCents:
 data class DailyRevenue(val date: String, val grossCents: Long)
 
 @Serializable
-data class DeviceRegistrationInput(val roomId: String, val name: String)
+data class DeviceRegistrationInput(
+    val roomId: String,
+    val name: String,
+    val role: String = DeviceRoles.COLLECTOR,
+)
 
 @Serializable
-data class DeviceRegistrationResponse(val deviceId: String, val deviceSecret: String)
+data class DeviceRegistrationTokenInput(
+    val roomId: String,
+    val role: String,
+    val ttlSeconds: Long = 600,
+)
+
+@Serializable
+data class DeviceRegistrationTokenView(
+    val id: String,
+    val roomId: String,
+    val role: String,
+    val token: String,
+    val expiresAtEpochMs: Long,
+)
+
+@Serializable
+data class DeviceBootstrapInput(
+    val registrationToken: String,
+    val deviceName: String,
+)
+
+@Serializable
+data class DeviceRegistrationResponse(
+    val deviceId: String,
+    val deviceSecret: String,
+    val roomId: String,
+    val role: String,
+    val wechatGroupReplyEnabled: Boolean = false,
+    val ingkeeVoiceRoomCaptureEnabled: Boolean = false,
+    val wechatCalibrationStatus: String = "待校准",
+    val ingkeeCalibrationStatus: String = "待校准",
+)
+
+@Serializable
+data class DeviceConfigResponse(
+    val deviceId: String,
+    val roomId: String,
+    val role: String,
+    val enabled: Boolean,
+    val wechatGroupReplyEnabled: Boolean,
+    val ingkeeVoiceRoomCaptureEnabled: Boolean,
+    val wechatCalibrationStatus: String,
+    val ingkeeCalibrationStatus: String,
+)
 
 @Serializable
 data class DeviceView(
     val id: String,
     val roomId: String,
     val name: String,
+    val role: String = DeviceRoles.COLLECTOR,
     val enabled: Boolean,
+    val wechatGroupReplyEnabled: Boolean = false,
+    val ingkeeVoiceRoomCaptureEnabled: Boolean = false,
+    val wechatCalibrationStatus: String = "待校准",
+    val ingkeeCalibrationStatus: String = "待校准",
+    val calibratedAtEpochMs: Long? = null,
+    val calibrationSummary: String? = null,
     val lastSeenAtEpochMs: Long? = null,
 )
+
+@Serializable
+data class DeviceCalibrationInput(
+    val capability: String,
+    val enabled: Boolean,
+    val status: String = "已校准",
+    val summary: String? = null,
+)
+
+object DeviceRoles {
+    const val ROBOT = "robot"
+    const val COLLECTOR = "collector"
+    val all = setOf(ROBOT, COLLECTOR)
+}
+
+object AdapterCapabilities {
+    const val WECHAT_GROUP_REPLY = "wechat_group_reply"
+    const val INGKEE_VOICE_ROOM_CAPTURE = "ingkee_voice_room_capture"
+    val all = setOf(WECHAT_GROUP_REPLY, INGKEE_VOICE_ROOM_CAPTURE)
+}
 
 @Serializable
 data class DeviceEventInput(
