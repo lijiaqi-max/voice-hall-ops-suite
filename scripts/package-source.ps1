@@ -12,6 +12,7 @@ if (Test-Path $staging) {
     Remove-Item -LiteralPath $staging -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $staging | Out-Null
+New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
 
 foreach ($file in @(".env.example", ".gitignore", "README.md")) {
     Copy-Item -LiteralPath (Join-Path $root $file) -Destination $staging
